@@ -47,6 +47,7 @@ def _startup() -> None:
     try:
         with connect(retries=2) as conn:
             aliases.seed_echo(conn)
+            aliases.seed_default_aliases(conn)
             if fed.enabled and not core.vault.is_initialized(conn):
                 core.vault.initialize_with_platform_secret(conn)   # single sign-on only: no admin password to wrap the key with
                 conn.commit()

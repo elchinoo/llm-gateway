@@ -40,7 +40,7 @@ def usage_rows(**where):
 
 # ---- the built-in echo demo ---------------------------------------------------------------------------------------
 def test_echo_works_out_of_the_box(client, op):
-    assert {a["alias"] for a in client.get("/api/models", headers=op).json()["items"]} == {"echo-chat", "echo-embed"}
+    assert {a["alias"] for a in client.get("/api/models", headers=op).json()["items"]} == {"echo-chat", "echo-embed", "chat-default", "embed-default"}
     _, key = add_client(client, op)
     r = ask(client, key, "hello gateway")
     assert r.status_code == 200
@@ -52,7 +52,7 @@ def test_echo_works_out_of_the_box(client, op):
     again = client.post("/v1/embeddings", headers=key, json={"model": "echo-embed", "input": "a"}).json()
     assert again["data"][0]["embedding"] == e["data"][0]["embedding"] != e["data"][1]["embedding"]   # deterministic per input
     assert abs(sum(v * v for v in e["data"][0]["embedding"]) - 1) < 1e-6
-    assert client.get("/v1/models", headers=key).json()["data"][0]["id"] in {"echo-chat", "echo-embed"}
+    assert client.get("/v1/models", headers=key).json()["data"][0]["id"] in {"echo-chat", "echo-embed", "chat-default", "embed-default"}
 
 
 def test_embedding_dimension_is_set_on_the_alias(client, op):
@@ -65,12 +65,119 @@ def test_embedding_dimension_is_set_on_the_alias(client, op):
 
 def test_the_echo_demo_is_seeded_once(client, op):
     from llmgw import aliases
-    for a in ("echo-chat", "echo-embed"):
+    for a in ("echo-chat", "echo-embed", "chat-default", "embed-default"):
         assert client.delete(f"/api/models/{a}", headers=op).status_code == 200
     pid = client.get("/api/providers", headers=op).json()["items"][0]["id"]
     assert client.delete(f"/api/providers/{pid}", headers=op).status_code == 200
     with connect() as conn:
         assert aliases.seed_echo(conn) is False
+
+
+# ---- default aliases and what `ecoctl apply` does with the admin API --------------------------------------------------
+def test_the_default_aliases_are_seeded_on_echo_and_work_for_a_new_client(client, op):
+    key = add_client(client, op, "trustdesk", allowed_aliases=["chat-default", "embed-default"])[1]
+    r = ask(client, key, "ping", model="chat-default")
+    assert r.status_code == 200 and r.json()["model"] == "chat-default" and "ping" in r.json()["choices"][0]["message"]["content"]
+    e = client.post("/v1/embeddings", headers=key, json={"model": "embed-default", "input": "x", "dimensions": 768}).json()
+    assert len(e["data"][0]["embedding"]) == 768                                  # what TrustDesk and PagerLens expect (EMBEDDING_DIM)
+    plain = client.post("/v1/embeddings", headers=key, json={"model": "embed-default", "input": "x"}).json()
+    assert len(plain["data"][0]["embedding"]) == 768
+    assert {m["id"] for m in client.get("/v1/models", headers=key).json()["data"]} == {"chat-default", "embed-default"}
+
+
+def test_repointing_the_default_alias_changes_every_client_without_touching_them(client, op):
+    key = add_client(client, op, "pagerlens", allowed_aliases=["chat-default"])[1]
+    pid = next(p["id"] for p in client.get("/api/providers", headers=op).json()["items"] if p["kind"] == "echo")
+    add_alias(client, op, "chat-default", [(pid, "echo-v2")])
+    assert ask(client, key, "hi", model="chat-default").json()["choices"][0]["message"]["content"].startswith("Echo from echo-v2")
+
+
+def test_default_alias_seeding_is_idempotent_and_never_overwrites_an_operators_alias(client, op):
+    from llmgw import aliases
+    pid = next(p["id"] for p in client.get("/api/providers", headers=op).json()["items"] if p["kind"] == "echo")
+    add_alias(client, op, "chat-default", [(pid, "operator-choice")], description="mine")
+    with connect() as conn:
+        assert aliases.seed_echo(conn) is False and aliases.seed_default_aliases(conn) is False      # a restart changes nothing
+    got = {a["alias"]: a for a in client.get("/api/models", headers=op).json()["items"]}
+    assert got["chat-default"]["targets"][0]["upstream_model"] == "operator-choice" and got["chat-default"]["description"] == "mine"
+    # deleted on purpose: stays deleted
+    assert client.delete("/api/models/embed-default", headers=op).status_code == 200
+    with connect() as conn:
+        assert aliases.seed_default_aliases(conn) is False
+    assert "embed-default" not in {a["alias"] for a in client.get("/api/models", headers=op).json()["items"]}
+
+
+def test_a_gateway_seeded_before_the_defaults_existed_gets_them_once_without_touching_anything_else(client, op):
+    from apgkit import settings_store as store
+
+    from llmgw import aliases
+    with connect() as conn:
+        conn.execute("DELETE FROM model_alias WHERE alias IN ('chat-default', 'embed-default')")
+        store.delete(conn, "seeded_defaults")                                                       # the state of an older deployment
+        conn.commit()
+    pid = next(p["id"] for p in client.get("/api/providers", headers=op).json()["items"] if p["kind"] == "echo")
+    add_alias(client, op, "echo-chat", [(pid, "tuned")])                                           # an operator's change to an existing alias
+    with connect() as conn:
+        assert aliases.seed_default_aliases(conn) is True
+        assert aliases.seed_default_aliases(conn) is False
+    got = {a["alias"]: a for a in client.get("/api/models", headers=op).json()["items"]}
+    assert {"chat-default", "embed-default"} <= set(got) and got["echo-chat"]["targets"][0]["upstream_model"] == "tuned"
+    assert got["chat-default"]["targets"][0]["provider_kind"] == "echo" and got["embed-default"]["embedding_dim"] == 768
+
+
+def test_no_echo_provider_means_no_default_aliases_and_no_resurrected_demo(client, op):
+    from apgkit import settings_store as store
+
+    from llmgw import aliases
+    with connect() as conn:
+        conn.execute("TRUNCATE provider RESTART IDENTITY CASCADE")                                                       # cascades to aliases
+        store.delete(conn, "seeded_defaults")
+        conn.commit()
+        assert aliases.seed_default_aliases(conn) is False
+        assert conn.execute("SELECT count(*) AS n FROM provider").fetchone()["n"] == 0
+
+
+def test_default_alias_names_and_embedding_size_are_configurable(client, op, monkeypatch):
+    from llmgw import aliases
+    monkeypatch.setenv("LLMGW_DEFAULT_CHAT_ALIAS", "smart")
+    monkeypatch.setenv("LLMGW_DEFAULT_EMBED_ALIAS", "vectors")
+    monkeypatch.setenv("LLMGW_DEFAULT_EMBED_DIM", "1536")
+    with connect() as conn:
+        conn.execute("TRUNCATE provider, model_alias, app_setting RESTART IDENTITY CASCADE")
+        conn.commit()
+        assert aliases.seed_echo(conn) is True
+    got = {a["alias"]: a for a in client.get("/api/models", headers=op).json()["items"]}
+    assert {"smart", "vectors", "echo-chat", "echo-embed"} == set(got) and got["vectors"]["embedding_dim"] == 1536
+    monkeypatch.setenv("LLMGW_DEFAULT_CHAT_ALIAS", "not a valid alias!")
+    assert aliases.default_alias_names()[0] == "chat-default"
+
+
+def test_the_static_operator_key_can_do_what_ecoctl_needs(client, op):
+    """Create a client per app, list clients, issue a key, find the active key and rotate it when it was lost: all with LLMGW_API_KEY."""
+    made = client.post("/api/clients", headers=op, json={"name": "paybroker", "description": "ecoctl", "allowed_aliases": ["chat-default", "embed-default"],
+                                                         "rpm_limit": 30, "monthly_token_budget": 1000, "budget_mode": "hard"})
+    assert made.status_code == 201
+    cid, first = made.json()["client"]["id"], made.json()["key"]["key"]
+    assert first.startswith("lg_")
+    listed = {c["name"]: c for c in client.get("/api/clients", headers=op).json()["items"]}
+    assert listed["paybroker"]["rpm_limit"] == 30 and listed["paybroker"]["monthly_token_budget"] == 1000
+    assert client.post("/api/clients", headers=op, json={"name": "paybroker"}).status_code == 422          # a second create is refused, not duplicated
+    keys = client.get(f"/api/clients/{cid}/keys", headers=op).json()["items"]
+    active = [k for k in keys if not k["revoked"]]
+    assert len(active) == 1 and "key_hash" not in active[0] and first not in json.dumps(keys)             # the key is never listed again
+    rotated = client.post(f"/api/clients/{cid}/keys/{active[0]['id']}/rotate", headers=op, json={"grace_minutes": 0}).json()
+    assert rotated["key"] != first and rotated["key"].startswith("lg_")
+    assert ask(client, bearer(first), model="chat-default").status_code == 401                              # the old key stopped at once
+    assert ask(client, bearer(rotated["key"]), model="chat-default").status_code == 200
+
+
+def test_a_budget_stops_one_app_without_affecting_another(client, op):
+    a = add_client(client, op, "app-a", allowed_aliases=["chat-default"], monthly_token_budget=5, budget_mode="hard")[1]
+    b = add_client(client, op, "app-b", allowed_aliases=["chat-default"], monthly_token_budget=1_000_000)[1]
+    assert ask(client, a, "x" * 200, model="chat-default").status_code == 200                      # crosses the 5-token budget
+    over = ask(client, a, "again", model="chat-default")
+    assert over.status_code == 429 and over.json()["error"]["code"] == "budget_exceeded"
+    assert ask(client, b, "hello", model="chat-default").status_code == 200
 
 
 # ---- the upstream key never leaks -----------------------------------------------------------------------------------
@@ -193,7 +300,7 @@ def test_a_client_only_uses_its_allowed_aliases(client, op):
     assert [m["id"] for m in client.get("/v1/models", headers=key).json()["data"]] == ["echo-chat"]
     assert client.get("/v1/models/echo-embed", headers=key).status_code == 404
     _, wide = add_client(client, op, "wide")
-    assert {m["id"] for m in client.get("/v1/models", headers=wide).json()["data"]} == {"echo-chat", "echo-embed"}
+    assert {m["id"] for m in client.get("/v1/models", headers=wide).json()["data"]} == {"echo-chat", "echo-embed", "chat-default", "embed-default"}
     assert client.post("/api/clients", headers=op, json={"name": "typo", "allowed_aliases": ["no-such"]}).status_code == 422
 
 

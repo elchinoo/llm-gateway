@@ -26,7 +26,7 @@ provider's chat completion with `model` set to the alias and the provider's `usa
 
 ### `POST /v1/embeddings`
 Allowed fields: `model`, `input` (a string, or a list of up to 256 strings), `dimensions`, `encoding_format` (`float` or `base64`).
-Returns `{object: "list", data: [{object: "embedding", index, embedding}], model, usage}`. The built-in `echo-embed` returns
+Returns `{object: "list", data: [{object: "embedding", index, embedding}], model, usage}`. The built-in `echo-embed` and `embed-default` return
 unit vectors of the alias's configured size (768 by default) derived from a hash of the input.
 
 ### `GET /v1/models`, `GET /v1/models/{alias}`

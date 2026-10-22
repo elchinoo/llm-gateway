@@ -28,7 +28,8 @@ model to another by editing an alias). Built on [agentpg-kit](https://github.com
 - **Providers** with the API key encrypted by the vault, a URL checked by the SSRF guard on save *and on every call*, and a
   Test button that makes one tiny call. A built-in `echo` provider needs no network and no key (a deterministic reply, plausible
   `usage`, and a hash-derived unit-vector embedding of configurable size, 768 by default), so demos and tests need no real
-  provider. The first start seeds one `echo` provider and the aliases `echo-chat` and `echo-embed`.
+  provider. The first start seeds one `echo` provider, the demo aliases `echo-chat` and `echo-embed`, and the **default aliases
+  `chat-default` and `embed-default`** (both on echo, embeddings of 768 numbers) that the whole fleet is wired to (see below).
 - **Dashboard** at `/`: Overview (usage per day, per client, spend against budget, top models, errors), Clients, Models,
   Providers, Audit (who changed what, never secrets), Settings, and Connect (copy-paste setup for each app, plus curl).
 - **Prometheus** at `/metrics`: the fleet's shared families plus `llmgw_requests_total{client,alias,status}`,
@@ -86,6 +87,16 @@ In each app open **Settings > AI accounts > Add an account** and fill in the sam
 
 The Connect page shows the same snippets with your URL filled in.
 
+## Default aliases: the one switch for every app
+
+`chat-default` (chat) and `embed-default` (embeddings, 768 dimensions, what TrustDesk and PagerLens expect) exist from the first start,
+on the built-in echo provider, so an app wired to them works immediately. To move **every app** to a real model, add the provider
+and **repoint the alias** (Models > `chat-default` > change its target, or `PUT /api/models/chat-default`); no app, client or key
+changes. Seeding is idempotent and never destructive: a gateway that predates the defaults gets them added once at its next start,
+an alias that already exists is left exactly as an operator made it, and an alias or echo provider you delete is not recreated.
+`ecoctl apply` (see the ecosystem repository) uses the static `LLMGW_API_KEY` to create one client per app and wires the apps to
+these two aliases with no manual step.
+
 ## Roles and single sign-on
 
 Standalone, the first-run admin has everything. Federated with the identity provider (`LLMGW_OIDC_ISSUER`, client id `llmgw`,
@@ -121,6 +132,7 @@ to call a model uses a client key.
 | `LLMGW_PUBLIC_URL` | Base URL used by the SSO callback (default: the request's own address). |
 | `LLMGW_ENCRYPTION_KEY[_FILE]` | Platform secret that lets the vault unlock itself after a restart (real providers need it) and lets an SSO-only deployment hold provider keys. |
 | `LLMGW_API_KEY[_FILE]` | Optional static full-access operator key. Prefer operator tokens. It is never accepted on `/v1`. |
+| `LLMGW_DEFAULT_CHAT_ALIAS`, `LLMGW_DEFAULT_EMBED_ALIAS`, `LLMGW_DEFAULT_EMBED_DIM` | Names of the default aliases seeded on echo (defaults `chat-default`, `embed-default`) and the size of the echo embedding (default: the Settings default, 768). Read at seeding time only. |
 | `LLMGW_ALLOW_PRIVATE_URLS` | Allow provider URLs on private networks (a local model server; local testing only). |
 | `LLMGW_UPSTREAM_TIMEOUT` | Seconds before a provider call times out (default 60, clamped to 1-120). |
 | `LLMGW_MAX_CONCURRENT` | Requests served at once (default 64); each in-flight call holds one worker thread. |
