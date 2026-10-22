@@ -1,0 +1,25 @@
+# LOCAL DEVELOPMENT ONLY. Set POSTGRES_PASSWORD in your git-ignored .env (see .env.example).
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: llmgw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: llmgw
+    ports: ["127.0.0.1:5437:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmgw"]
+      interval: 3s
+      retries: 20
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://llmgw:${POSTGRES_PASSWORD}@db:5432/llmgw
+      # First run prints a one-time setup code: see `docker compose logs api`.
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+    command: llmgw start
+volumes:
+  pgdata:

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" data-csrf="X-LLMGW-CSRF">
+<head>
+<meta charset="utf-8">
+<title>LLM gateway</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="One OpenAI-compatible endpoint in front of your model providers, with per-app keys, budgets, rate limits, failover and usage metering.">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/kit/base.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#overview"><img src="/static/logo.svg" alt="" width="34" height="34"><span>LLM gateway</span></a>
+  <nav id="nav" class="tabs" hidden>
+    <a href="#overview" data-tab="overview">Overview</a>
+    <a href="#clients" data-tab="clients">Clients</a>
+    <a href="#models" data-tab="models">Models</a>
+    <a href="#providers" data-tab="providers">Providers</a>
+    <a href="#audit" data-tab="audit">Audit</a>
+    <a href="#settings" data-tab="settings">Settings</a>
+    <a href="#connect" data-tab="connect">Connect</a>
+  </nav>
+  <button id="signout" class="ghost" type="button" hidden>Sign out</button>
+</header>
+
+<main>
+  <section id="auth-card" class="card narrow" hidden></section>
+  <div id="vault-banner" class="banner vault" hidden></div>
+  <section id="view-overview" hidden></section>
+  <section id="view-clients" hidden></section>
+  <section id="view-models" hidden></section>
+  <section id="view-providers" hidden></section>
+  <section id="view-audit" hidden></section>
+  <section id="view-settings" hidden></section>
+  <section id="view-connect" hidden></section>
+</main>
+
+<dialog id="detail" aria-label="Details" class="window"><button id="detail-close" class="ghost close" type="button" aria-label="Close">✕</button><div id="detail-body"></div></dialog>
+<dialog id="form" aria-label="Form" class="window narrow-window"><button id="form-close" class="ghost close" type="button" aria-label="Close">✕</button><div id="form-body"></div></dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" popover="manual" hidden></div>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>

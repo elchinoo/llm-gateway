@@ -1,0 +1,79 @@
+# Security policy
+
+## Reporting a vulnerability
+Please **do not open a public issue** for security problems. Use GitHub's private vulnerability reporting
+("Security" tab → "Report a vulnerability") on this repository. Include steps to reproduce and the affected version or commit.
+
+## What this is
+A gateway that holds your model providers' API keys and lets many apps use them through their own limited keys. The model below
+is what it enforces, and where it stops.
+
+## Security model
+
+**Provider keys**
+- Encrypted with a random data key that is stored only wrapped under a key derived from the admin password (and optionally a
+  platform secret, `LLMGW_ENCRYPTION_KEY`). A database dump alone reveals none of them. After a restart the vault is locked until
+  a sign-in or the platform secret unlocks it; real providers then answer 503 `vault_locked` and the echo provider keeps working.
+- The key is decrypted only to build one upstream request. It is never returned by any endpoint (only its last four characters),
+  never written to the usage table, the audit trail, logs or metrics, and any provider text passed back to a caller, or shown in a
+  test result, goes through the kit's `redact` and is truncated. A test scans every table, the metrics, the log and every response
+  for a key that the mock provider echoes back in a 200, a 400, a 500 and a connection error.
+- Provider URLs are validated when saved and **again on every call** (the guard resolves the name each time, so DNS that starts
+  pointing at a private address after the save is refused): `https` only (unless private URLs are explicitly allowed), no
+  embedded credentials, no loopback, private, link-local (cloud metadata) or carrier-grade-NAT addresses, no redirects, bounded
+  responses (8 MB), bounded time (`LLMGW_UPSTREAM_TIMEOUT`). Limitation: the host name is resolved once for the check and again by
+  the HTTP client; use egress rules if that matters.
+
+**Two kinds of credential that never cross**
+- *Client keys* (`lg_...`) are random, shown once and stored as SHA-256 hashes. They carry only `llm:use`, are refused on every
+  `/api` route and on `/metrics`, and a client sees only the models it is allowed. A revoked key, a disabled client or a changed
+  limit takes effect on the next request in every process (the lookup is not cached). A rotation may leave the old key working for a
+  grace period an operator chooses, never longer.
+- *Operator credentials* (browser sessions, `lgt_` tokens, the static key, single-sign-on tokens of people) are refused on `/v1`,
+  including the wildcard `*` ones (the local admin and the static key hold `*`). Cookies are not credentials on `/v1`.
+- A service token from the identity provider with scope `llmgw.use` is accepted only if its subject names a **registered, enabled
+  client**, and then that client's models, rate limit and budget apply.
+- Bad keys on `/v1` are counted per address (30 per minute) and then answered 429; a valid key is never blocked by other callers'
+  failures. Keys are 256-bit random values, so guessing is not the realistic threat.
+
+**What is stored about a request**
+- **No prompts, completions, embedding inputs or embedding outputs, anywhere.** A usage row holds the client, key id, alias,
+  provider, upstream model, token counts, estimated cost, latency, status, error class and attempt count. Unknown model names from a
+  caller are not stored or used as metric labels. A test sends a marker string in prompts (accepted, rejected, failing and echo
+  requests) and scans every table for it.
+- Prompts and answers do pass through the gateway's memory, and to the provider you chose: the gateway is as trustworthy as the
+  host it runs on and the providers behind it.
+
+**The data plane's shape**
+- Only an allow-list of fields is forwarded; unknown fields (tools, `user`, provider-specific passthrough) are refused with 400,
+  `stream: true` is refused, `n` must be 1, messages carry text only, values are range checked. Bodies over 512 KB are refused with
+  413 (also when chunked, without reading past the limit). Responses over 8 MB are refused.
+- The response's `model` is rewritten to the alias; the upstream's model name is not exposed.
+
+**Operators**
+- First run: nobody has an account; the server prints a one-time setup code to its log, and whoever presents it sets the admin
+  password (salted scrypt, 12 characters minimum). Browser sessions are `HttpOnly` `SameSite` cookies (`Secure` over HTTPS) whose
+  SHA-256 is stored, last 12 hours and end on password change or sign-out. Browser writes need a custom header
+  (`X-LLMGW-CSRF`).
+- Operator tokens are shown once, hashed, revocable and scoped (`read`, `metrics`, `full`).
+- **Single sign-on** (optional, `LLMGW_OIDC_ISSUER`): tokens are verified locally against the identity provider's JWKS (algorithm
+  allow-list, issuer, audience, expiry); only this app's roles count and they map to permissions in `core.py`. Browser sign-in is
+  authorization code + PKCE with state and nonce. A person with no role here is refused.
+- Failed operator credentials are rate limited (10 per minute per address, in memory per process; add proxy limits too).
+- Every change to providers, aliases, clients, keys, tokens, settings and the admin password is written to the **audit trail**
+  with who made it. Secrets are never recorded.
+
+**Hardening**
+- Strict `Content-Security-Policy` (no inline script or style), `nosniff`, no framing, no referrer, no caching. All text reaches the
+  page through `textContent`. CSV exports neutralise cells that start with `=`, `+`, `-` or `@`.
+- The container runs as a non-root user and holds no credentials; the database URL arrives at runtime.
+
+## Known limits
+- **The request rate limit is per process and in memory**; with N replicas a client can reach N times its limit. So are the
+  failed-credential limits.
+- **Budgets are checked before the call**, so requests in flight can overshoot; token counts without a provider `usage` block are
+  estimates (characters / 4); prices are entered by an admin. Cost is an estimate, not an invoice.
+- No streaming, and no tools or multimodal input, by design.
+- Behind a reverse proxy every caller may share one address, which makes the per-address failed-credential limits coarse
+  (valid data-plane keys are unaffected, operator sign-in attempts are not): set proxy-level limits too.
+- One audit trail row per change; it records that a key was issued or revoked, not its value.

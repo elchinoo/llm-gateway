@@ -1,0 +1,34 @@
+main { max-width: 76rem; }
+.badge.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.badge.bad { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.stats { display: flex; flex-wrap: wrap; gap: .6rem; margin: .5rem 0 1rem; }
+.stat { background: var(--surface); border: 1px solid var(--line); color: var(--text); display: flex; flex-direction: column; align-items: flex-start; padding: .5rem .9rem; min-width: 8rem; }
+.stat strong { font-size: 1.4rem; line-height: 1.1; }
+.stat span { color: var(--muted); font-size: .85rem; }
+.stat.hot { border-color: var(--warn); }
+.alert { border: 1px solid var(--warn); background: var(--warn-bg); color: var(--text); border-radius: 10px; padding: .6rem .9rem; margin: .5rem 0 1rem; }
+.alert.bad { border-color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+td.wrap, th.wrap { white-space: normal; min-width: 9rem; max-width: 24rem; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: color-mix(in srgb, var(--brand) 5%, transparent); }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; align-items: start; }
+.chart { width: 100%; height: auto; display: block; }
+.chart rect.bar { fill: var(--brand); }
+.chart rect.bar.err { fill: var(--err); }
+.chart rect.track { fill: color-mix(in srgb, var(--muted) 20%, transparent); }
+.chart rect.ok { fill: var(--ok); }
+.chart rect.warn { fill: var(--warn); }
+.chart rect.high { fill: var(--err); }
+.chart text { fill: var(--muted); font-size: 11px; }
+.meter { width: 7rem; height: .9rem; display: inline-block; vertical-align: middle; }
+.targets .row { margin-bottom: .4rem; justify-content: flex-start; }
+.targets select, .targets input { margin: 0; }
+.checkgrid { display: flex; flex-wrap: wrap; gap: .8rem; }
+.checkgrid label, label.check { display: flex; gap: .35rem; align-items: center; font-weight: 400; }
+code.json { display: block; white-space: pre-wrap; word-break: break-word; font-size: .8rem; color: var(--muted); }
+dialog.window { width: min(64rem, 96vw); max-height: 94vh; overflow: auto; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--text); padding: 1.25rem; box-shadow: var(--shadow); }
+dialog.window.narrow-window { width: min(36rem, 96vw); background: var(--surface); }
+dialog.window::backdrop { background: rgb(10 12 28 / .55); }
+dialog .close { position: sticky; float: right; top: 0; z-index: 2; }
+@media (max-width: 52rem) { .cols { grid-template-columns: 1fr; } }
