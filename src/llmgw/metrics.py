@@ -11,9 +11,11 @@ observe = metrics.observe
 
 REQUESTS = Counter("llmgw_requests_total", "Data-plane requests by client, model alias and HTTP status", ["client", "alias", "status"],
                    registry=REGISTRY)
-TOKENS = Counter("llmgw_tokens_total", "Tokens metered (upstream usage, or an estimate)", ["client", "alias", "kind"], registry=REGISTRY)
+TOKENS = Counter("llmgw_tokens_total", "Tokens metered (upstream usage, or an estimate); kind=reasoning is the thinking part already inside completion", ["client", "alias", "kind"], registry=REGISTRY)
 UPSTREAM = Histogram("llmgw_upstream_latency_seconds", "Latency of calls to providers", ["provider"], registry=REGISTRY,
                      buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120))
+EMPTY_CONTENT = Counter("llmgw_empty_content_total", "200 answers with empty content but a reasoning field (a thinking model cut off by max_tokens)",
+                        ["alias"], registry=REGISTRY)
 BUDGET_REJECTIONS = Counter("llmgw_budget_rejections_total", "Requests refused because the monthly token budget was used up", ["client"],
                             registry=REGISTRY)
 FAILOVERS = Counter("llmgw_failovers_total", "Times a request moved on to the next target of a model alias", registry=REGISTRY)

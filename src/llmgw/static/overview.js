@@ -44,7 +44,7 @@ export async function initOverview() {
   }
   parts.push(h("div", { class: "stats" },
     stat(num(t.requests), "requests"),
-    stat(compact(t.total_tokens), `tokens (${compact(t.prompt_tokens)} in, ${compact(t.completion_tokens)} out)`),
+    stat(compact(t.total_tokens), `tokens (${compact(t.prompt_tokens)} in, ${compact(t.completion_tokens)} out${t.reasoning_tokens ? `, of which ${compact(t.reasoning_tokens)} thinking` : ""})`),
     stat(usd(t.cost_usd), "estimated cost"),
     stat(num(t.errors), "errors", t.errors > 0),
     stat(`${t.p95_latency_ms} ms`, `p95 latency (avg ${t.avg_latency_ms})`),
@@ -64,8 +64,8 @@ export async function initOverview() {
         h("td", {}, c.budget ? [meter(c.budget_used, `${Math.round(c.budget_used * 100)}% of the monthly budget`), ` ${Math.round(c.budget_used * 100)}% of ${compact(c.budget)} `, h("span", { class: "muted" }, c.budget_mode)] : h("span", { class: "muted" }, "no budget")),
         h("td", { class: "num" }, num(c.errors))))));
     parts.push(h("div", { class: "cols" },
-      h("div", {}, h("h3", {}, "Models"), table([["Alias"], ["Requests", "num"], ["Tokens", "num"], ["Est. cost", "num"], ["p95", "num"]],
-        o.models.map((m) => h("tr", {}, h("td", { class: "title" }, m.key), h("td", { class: "num" }, num(m.requests)), h("td", { class: "num" }, compact(m.total_tokens)), h("td", { class: "num" }, usd(m.cost_usd)), h("td", { class: "num" }, `${m.p95_latency_ms} ms`))))),
+      h("div", {}, h("h3", {}, "Models"), table([["Alias"], ["Requests", "num"], ["Tokens", "num"], ["Thinking", "num"], ["Est. cost", "num"], ["p95", "num"]],
+        o.models.map((m) => h("tr", {}, h("td", { class: "title" }, m.key), h("td", { class: "num" }, num(m.requests)), h("td", { class: "num" }, compact(m.total_tokens)), h("td", { class: "num" }, compact(m.reasoning_tokens)), h("td", { class: "num" }, usd(m.cost_usd)), h("td", { class: "num" }, `${m.p95_latency_ms} ms`))))),
       h("div", {}, h("h3", {}, "Errors"), o.errors.length ? table([["Class"], ["Count", "num"]], o.errors.map((e) => h("tr", {}, h("td", {}, e.error_class), h("td", { class: "num" }, num(e.n))))) : h("p", { class: "muted" }, "No errors in this period."))));
   }
   fill(box, ...parts);

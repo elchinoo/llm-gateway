@@ -32,3 +32,6 @@ dialog.window.narrow-window { width: min(36rem, 96vw); background: var(--surface
 dialog.window::backdrop { background: rgb(10 12 28 / .55); }
 dialog .close { position: sticky; float: right; top: 0; z-index: 2; }
 @media (max-width: 52rem) { .cols { grid-template-columns: 1fr; } }
+.target { margin-bottom: 1rem; }
+.target textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+.target .row { flex-wrap: wrap; }

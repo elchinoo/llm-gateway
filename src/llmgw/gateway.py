@@ -21,6 +21,8 @@ ROLES = {"system", "user", "assistant", "developer"}
 CHAT_FIELDS = {"model", "messages", "max_tokens", "temperature", "top_p", "stop", "response_format", "seed", "presence_penalty",
                "frequency_penalty", "n"}
 EMBED_FIELDS = {"model", "input", "dimensions", "encoding_format"}
+REASONING_FIELDS = ("reasoning", "reasoning_content")
+EMPTY_NOTE = "empty-content-reasoning-only"
 ENDPOINTS = {"chat": ("chat/completions", "chat", CHAT_FIELDS), "embeddings": ("embeddings", "embedding", EMBED_FIELDS)}
 
 
@@ -173,7 +175,7 @@ def _alias_row(conn, alias: str) -> dict | None:
     row = conn.execute("SELECT * FROM model_alias WHERE alias=%s", (alias,)).fetchone()
     if row:
         row["targets"] = conn.execute(
-            "SELECT t.position, t.upstream_model, p.* FROM alias_target t JOIN provider p ON p.id = t.provider_id WHERE t.alias=%s ORDER BY t.position",
+            "SELECT t.position, t.upstream_model, t.extra_body, p.* FROM alias_target t JOIN provider p ON p.id = t.provider_id WHERE t.alias=%s ORDER BY t.position",
             (alias,)).fetchall()
     conn.rollback()
     return row
@@ -212,6 +214,8 @@ def _finish(ev: Event) -> None:
     if ev.status < 400 and ev.total_tokens:
         m.TOKENS.labels(ev.client_name, label_alias, "prompt").inc(ev.prompt_tokens)
         m.TOKENS.labels(ev.client_name, label_alias, "completion").inc(ev.completion_tokens)
+        if ev.reasoning_tokens:
+            m.TOKENS.labels(ev.client_name, label_alias, "reasoning").inc(ev.reasoning_tokens)
     try:
         with core.db.pool().connection() as conn:
             usage.record(conn, ev)
@@ -260,11 +264,11 @@ def _call_targets(alias: dict, path: str, fields: dict, prompt_chars: int, ev: E
         ev.attempts += 1
         ev.provider_name, ev.upstream_model = t["name"], t["upstream_model"]
         began = time.perf_counter()
-        res = providers.call(t, path, fields, t["upstream_model"], alias["embedding_dim"])
+        res = providers.call(t, path, fields, t["upstream_model"], alias["embedding_dim"], t["extra_body"])
         if t["kind"] != "echo" and res.fail != "locked":
             m.UPSTREAM.labels(t["name"]).observe(time.perf_counter() - began)
         if res.ok:
-            return _success(alias, res.data, prompt_chars, ev)
+            return _success(alias, res.data, prompt_chars, ev, path)
         last = res
         if not res.retryable:
             break
@@ -273,12 +277,34 @@ def _call_targets(alias: dict, path: str, fields: dict, prompt_chars: int, ev: E
     raise _upstream_error(last)
 
 
-def _success(alias: dict, data: dict, prompt_chars: int, ev: Event) -> Result:
+def reasoning_tokens_from(data: dict) -> int | None:
+    """Thinking tokens the upstream reports (usage.completion_tokens_details.reasoning_tokens), or None when it does not."""
+    u = data.get("usage")
+    details = u.get("completion_tokens_details") if isinstance(u, dict) else None
+    return _int(details.get("reasoning_tokens")) if isinstance(details, dict) else None
+
+
+def reasoning_only(data: dict) -> bool:
+    """True when the first choice has no answer text but carries reasoning: a thinking model that ran out of max_tokens."""
+    choices = data.get("choices")
+    msg = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    if not isinstance(msg, dict) or msg.get("content") not in (None, ""):
+        return False
+    return any(msg.get(k) for k in REASONING_FIELDS)
+
+
+def _success(alias: dict, data: dict, prompt_chars: int, ev: Event, path: str = "chat/completions") -> Result:
     p, c, total, est = tokens_from(data, prompt_chars, _completion_chars(data))
     ev.prompt_tokens, ev.completion_tokens, ev.total_tokens, ev.estimated = p, c, total, est
+    ev.reasoning_tokens = reasoning_tokens_from(data)
     ev.cost_usd, ev.status = cost_of(alias, p, c), 200
     data["model"] = alias["alias"]
-    return Result(200, json.dumps(data).encode(), {})
+    headers = {}
+    if path == "chat/completions" and reasoning_only(data):
+        # Passed through unchanged: the app decides. The header and the metric tell the operator it happens.
+        headers["x-llmgw-note"] = EMPTY_NOTE
+        m.EMPTY_CONTENT.labels(alias["alias"]).inc()
+    return Result(200, json.dumps(data).encode(), headers)
 
 
 def _upstream_error(res: providers.Upstream | None) -> GatewayError:

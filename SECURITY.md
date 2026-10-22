@@ -48,6 +48,13 @@ is what it enforces, and where it stops.
 - Only an allow-list of fields is forwarded; unknown fields (tools, `user`, provider-specific passthrough) are refused with 400,
   `stream: true` is refused, `n` must be 1, messages carry text only, values are range checked. Bodies over 512 KB are refused with
   413 (also when chunked, without reading past the limit). Responses over 8 MB are refused.
+- **`extra_body` is operator-controlled.** The only way a provider-specific field reaches an upstream is the operator-set
+  `extra_body` of an alias target (permission `models:manage`); a client cannot send one and its fields never override it. It cannot
+  set the gateway-owned keys `model`, `messages`, `input`, `stream`, `user`, `n` (refused at save, dropped again at call time),
+  must be a plain JSON object of at most 4 KB and 4 levels, and is merged after the client's fields. A provider's secrets are
+  never in it (the key stays encrypted on the provider and is added only to the Authorization header), and changes are written
+  to the audit trail with their content, so operators must not paste a secret into it. It does not widen what a client can read:
+  responses are passed through as before (including any `reasoning` text the provider returns, which is model output).
 - The response's `model` is rewritten to the alias; the upstream's model name is not exposed.
 
 **Operators**

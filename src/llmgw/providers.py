@@ -167,8 +167,10 @@ def _shape_ok(endpoint: str, data) -> bool:
     return isinstance(data, dict) and isinstance(data.get(key), list) and bool(data[key])
 
 
-def call(provider: dict, endpoint: str, body: dict, upstream_model: str, embedding_dim: int) -> Upstream:
+def call(provider: dict, endpoint: str, body: dict, upstream_model: str, embedding_dim: int, extra_body: dict | None = None) -> Upstream:
     """One attempt against one target. `endpoint` is `chat/completions` or `embeddings`; `body` holds only allow-listed fields.
+    `extra_body` is the operator's per-target fields: merged after the client's, so they win; the gateway-owned keys are
+    dropped here again even though they were refused when saved. The echo provider ignores it.
     Never raises for provider trouble: the outcome says what happened, with provider text passed through `redact`."""
     if provider["kind"] == "echo":
         return Upstream(data=echo_call("embeddings" if endpoint == "embeddings" else "chat", body, upstream_model, embedding_dim))
@@ -180,7 +182,9 @@ def call(provider: dict, endpoint: str, body: dict, upstream_model: str, embeddi
             return Upstream(503, fail="locked", message="the provider's key is locked; an administrator must unlock the vault")
         except VaultError:
             return Upstream(502, fail="bad_response", message="the stored provider key could not be decrypted; re-enter it")
-    sent = {**body, "model": upstream_model}
+    from .aliases import EXTRA_BODY_RESERVED
+    extra = {k: v for k, v in (extra_body or {}).items() if k not in EXTRA_BODY_RESERVED}
+    sent = {**body, **extra, "model": upstream_model}
     try:
         resp = core.llm.post_json(provider["base_url"], "/" + endpoint, key, sent, trusted=False, retries=0)
     except LLMError as exc:

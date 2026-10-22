@@ -52,10 +52,18 @@ Always `{"error": {"message", "type", "code"}}`:
 Failover: targets are tried in order; the next one is used after a 5xx, a 429, a timeout, a connection error or a malformed answer,
 and never after another 4xx.
 
+### Thinking models
+A reasoning model can spend a small `max_tokens` on thinking and return an empty `content`. Operators fix that per alias target with
+`extra_body` (see below and the README's "Thinking models"). If a 200 answer still has an empty or null `message.content` while
+`reasoning` or `reasoning_content` is present, it is returned unchanged with the response header
+`x-llmgw-note: empty-content-reasoning-only`; check `finish_reason: "length"` and raise `max_tokens`, or ask the operator to turn
+thinking off for that alias.
+
 ### What is metered
 One usage row per chat or embeddings request (including refusals once the client is known). Tokens are the provider's `usage`; if it
 is missing or not sane they are estimated as characters / 4 and the row is marked `estimated`. A request that fails without
-returning tokens counts zero tokens and no cost. Prompts and answers are never stored.
+returning tokens counts zero tokens and no cost. Prompts and answers are never stored. When the provider reports `usage.completion_tokens_details.reasoning_tokens` it is kept as
+`reasoning_tokens` (part of the completion tokens, null when not reported).
 
 ## Control plane (`/api`)
 
@@ -68,7 +76,7 @@ don't need it. Bodies are JSON and unknown fields are rejected (422); bodies ove
 |---|---|---|
 | `GET /api/session` | none | what the UI should show; the caller's roles and permissions |
 | `GET /api/overview?days=` | `usage:read` | totals, per day, per client with budget use this month, top models, errors, budget alerts |
-| `GET /api/usage?group=client\|alias\|provider\|day&days=&client=&alias=` | `usage:read` | requests, errors, tokens, estimated requests, cost, average and p95 latency |
+| `GET /api/usage?group=client\|alias\|provider\|day&days=&client=&alias=` | `usage:read` | requests, errors, tokens (including `reasoning_tokens`, the thinking part of the completion tokens), estimated requests, cost, average and p95 latency |
 | `GET /api/usage.csv?...` | `usage:read` | the same as CSV |
 | `GET /api/usage/recent?limit=&errors_only=` | `usage:read` | the latest metering rows (metadata only) |
 | `GET /api/providers` | `config:read` | keys are never returned (`has_key`, `api_key_last4`) |
@@ -76,7 +84,7 @@ don't need it. Bodies are JSON and unknown fields are rejected (422); bodies ove
 | `PUT /api/providers/{id}` `{name, base_url, api_key?, clear_key, enabled}`, `DELETE /api/providers/{id}` | `providers:manage` | delete is `409` while an alias uses it |
 | `POST /api/providers/{id}/test` `{model}` | `providers:manage` | one tiny call; not metered |
 | `GET /api/models` | `config:read` | aliases with their ordered targets |
-| `PUT /api/models/{alias}` `{kind: chat\|embedding, description, enabled, embedding_dim, price_prompt_per_m, price_completion_per_m, targets: [{provider_id, upstream_model}]}`, `DELETE /api/models/{alias}` | `models:manage` | 1 to 5 targets; prices are USD per 1M tokens; `embedding_dim` applies to the echo provider |
+| `PUT /api/models/{alias}` `{kind: chat\|embedding, description, enabled, embedding_dim, price_prompt_per_m, price_completion_per_m, targets: [{provider_id, upstream_model, extra_body?}]}`, `DELETE /api/models/{alias}` | `models:manage` | 1 to 5 targets; prices are USD per 1M tokens; `embedding_dim` applies to the echo provider. `extra_body` (optional JSON object, default `{}`, returned by `GET`) is merged into the upstream request after the client's fields and wins over them, e.g. `{"reasoning": {"enabled": false}}`; the keys `model, messages, input, stream, user, n` are refused (422), as are non-objects, more than 4 KB and more than 4 levels of nesting. The echo provider ignores it. Changes are audited |
 | `GET /api/clients` | `config:read` | with this month's usage |
 | `POST /api/clients` `{name, description, allowed_aliases, rpm_limit, unlimited_rpm, monthly_token_budget, budget_mode: hard\|soft, issue_key}` | `clients:manage` | returns the client and, by default, its first key (shown once) |
 | `PATCH /api/clients/{id}`, `DELETE /api/clients/{id}` | `clients:manage` | `rpm_limit: null` is unlimited; `monthly_token_budget: null` removes the budget |

@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from llmgw import gateway, providers, usage
+from llmgw import aliases, gateway, providers, usage
 from llmgw.gateway import GatewayError
 
 
@@ -98,7 +98,7 @@ def test_echo_is_deterministic_and_plausible():
 
 
 def test_csv_cells_cannot_run_as_formulas():
-    row = {"key": "=HYPERLINK(1)", "requests": 1, "errors": 0, "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
+    row = {"key": "=HYPERLINK(1)", "requests": 1, "errors": 0, "prompt_tokens": 1, "completion_tokens": 1, "reasoning_tokens": 0, "total_tokens": 2,
            "estimated_requests": 0, "cost_usd": 0.0, "avg_latency_ms": 1, "p95_latency_ms": 1, "over_budget_requests": 0}
     out = usage.to_csv([row, {**row, "key": "@x"}, {**row, "key": "plain"}], "client").splitlines()
     assert out[1].startswith("'=HYPERLINK") and out[2].startswith("'@x") and out[3].startswith("plain,")
@@ -107,3 +107,73 @@ def test_csv_cells_cannot_run_as_formulas():
 def test_gateway_error_shape():
     e = GatewayError(429, "budget_exceeded", "used up", "insufficient_quota")
     assert e.body() == {"error": {"message": "used up", "type": "insufficient_quota", "code": "budget_exceeded"}}
+
+
+# ---- extra_body: validation, merge, reasoning detection ---------------------------------------------------------------------------
+def test_extra_body_accepts_the_documented_presets():
+    for ok in ({"reasoning": {"enabled": False}}, {"chat_template_kwargs": {"enable_thinking": False}}, {"reasoning_effort": "low"},
+               {"thinking": {"type": "disabled"}}, {}, None):
+        assert aliases.validate_extra_body(ok) == (ok or {})
+
+
+@pytest.mark.parametrize("bad", [
+    {"model": "x"}, {"messages": []}, {"input": "x"}, {"stream": True}, {"user": "u"}, {"n": 2}, {"ok": 1, "model": "x"},
+    [], "text", 5, True, [{"a": 1}],
+    {"a": {"b": {"c": {"d": {"e": 1}}}}}, {"a": [[[[1]]]]},
+    {"big": "x" * 5000}, {"k" + str(i): "v" * 50 for i in range(100)},
+    {"f": float("nan")}, {"f": float("inf")}, {"a": object()}, {"a": {1, 2}}, {"a": b"bytes"}, {1: "int key"},
+])
+def test_extra_body_rejects(bad):
+    with pytest.raises(aliases.AliasError):
+        aliases.validate_extra_body(bad)
+
+
+def test_extra_body_limits_are_inclusive_at_the_edge():
+    assert aliases.validate_extra_body({"a": {"b": {"c": {"d": 1}}}})        # 4 levels of objects
+    assert aliases.validate_extra_body({"v": "x" * 4000})                    # under 4 KB
+    with pytest.raises(aliases.AliasError):                                  # one level more is too deep
+        aliases.validate_extra_body({"a": {"b": {"c": {"d": {}}}}})
+    assert aliases.validate_extra_body({"nested": {"model": "fine here"}})   # a nested `model` is the provider's own field, not ours
+
+
+def test_extra_body_merges_after_the_client_fields_and_cannot_touch_reserved_ones(monkeypatch):
+    sent = {}
+
+    class Resp:
+        status_code, headers, text = 200, {}, ""
+        def json(self): return {"choices": [{"message": {"content": "x"}}]}
+
+    monkeypatch.setattr(providers.core.llm, "post_json", lambda base, path, key, body, **k: sent.update(body) or Resp())
+    prov = {"kind": "openai", "api_key_enc": None, "base_url": "https://x.test/v1"}
+    body = {"messages": msgs(), "max_tokens": 8, "temperature": 0.2}
+    providers.call(prov, "chat/completions", body, "up-model", 8, {"reasoning": {"enabled": False}, "max_tokens": 512, "model": "evil", "n": 9, "user": "u"})
+    assert sent == {"messages": msgs(), "max_tokens": 512, "temperature": 0.2, "reasoning": {"enabled": False}, "model": "up-model"}
+    assert body == {"messages": msgs(), "max_tokens": 8, "temperature": 0.2}        # the caller's dict is not mutated
+    sent.clear()
+    providers.call(prov, "chat/completions", body, "up-model", 8)
+    assert sent == {**body, "model": "up-model"}
+
+
+def test_echo_provider_ignores_extra_body():
+    a = providers.call({"kind": "echo"}, "chat/completions", {"messages": msgs("hi")}, "echo-1", 8, {"reasoning": {"enabled": False}})
+    b = providers.call({"kind": "echo"}, "chat/completions", {"messages": msgs("hi")}, "echo-1", 8)
+    assert a.data == b.data
+
+
+def test_reasoning_tokens_and_reasoning_only_detection():
+    d = {"usage": {"prompt_tokens": 9, "completion_tokens": 143, "completion_tokens_details": {"reasoning_tokens": 139}}}
+    assert gateway.reasoning_tokens_from(d) == 139
+    for none in ({}, {"usage": {}}, {"usage": {"completion_tokens_details": None}}, {"usage": {"completion_tokens_details": {"reasoning_tokens": "x"}}},
+                 {"usage": {"completion_tokens_details": {"reasoning_tokens": -1}}}):
+        assert gateway.reasoning_tokens_from(none) is None
+
+    def reply(**msg):
+        return {"choices": [{"message": {"role": "assistant", **msg}}]}
+
+    assert gateway.reasoning_only(reply(content="", reasoning="thinking...")) is True
+    assert gateway.reasoning_only(reply(content=None, reasoning_content="thinking...")) is True
+    assert gateway.reasoning_only(reply(reasoning="thinking...")) is True                  # no content key at all
+    assert gateway.reasoning_only(reply(content="OK", reasoning="thinking...")) is False
+    assert gateway.reasoning_only(reply(content="")) is False                              # empty but no reasoning: nothing to note
+    assert gateway.reasoning_only(reply(content="", reasoning="")) is False
+    assert gateway.reasoning_only({"choices": []}) is False and gateway.reasoning_only({}) is False

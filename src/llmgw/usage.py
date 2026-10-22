@@ -25,15 +25,16 @@ class Event:
     error_class: str | None = None
     attempts: int = 0
     over_budget: bool = False
+    reasoning_tokens: int | None = None     # thinking tokens (already inside completion_tokens), when the upstream reports them
 
 
 def record(conn, e: Event) -> None:
     conn.execute(
         "INSERT INTO usage_event (client_id, client_name, key_id, endpoint, alias, provider_name, upstream_model, prompt_tokens, "
-        "completion_tokens, total_tokens, estimated, cost_usd, latency_ms, status, error_class, attempts, over_budget) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "completion_tokens, total_tokens, estimated, cost_usd, latency_ms, status, error_class, attempts, over_budget, reasoning_tokens) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (e.client_id, e.client_name, e.key_id, e.endpoint, e.alias, e.provider_name, e.upstream_model, e.prompt_tokens,
-         e.completion_tokens, e.total_tokens, e.estimated, e.cost_usd, e.latency_ms, e.status, e.error_class, e.attempts, e.over_budget))
+         e.completion_tokens, e.total_tokens, e.estimated, e.cost_usd, e.latency_ms, e.status, e.error_class, e.attempts, e.over_budget, e.reasoning_tokens))
     conn.commit()
 
 
@@ -58,7 +59,8 @@ GROUPS = {
 }
 _AGG = ("count(*)::int AS requests, count(*) FILTER (WHERE status >= 400)::int AS errors, "
         "coalesce(sum(prompt_tokens),0)::bigint AS prompt_tokens, coalesce(sum(completion_tokens),0)::bigint AS completion_tokens, "
-        "coalesce(sum(total_tokens),0)::bigint AS total_tokens, coalesce(sum(cost_usd),0)::float AS cost_usd, "
+        "coalesce(sum(total_tokens),0)::bigint AS total_tokens, coalesce(sum(reasoning_tokens),0)::bigint AS reasoning_tokens, "
+        "coalesce(sum(cost_usd),0)::float AS cost_usd, "
         "count(*) FILTER (WHERE estimated)::int AS estimated_requests, coalesce(round(avg(latency_ms)),0)::int AS avg_latency_ms, "
         "coalesce(round(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)),0)::int AS p95_latency_ms, "
         "count(*) FILTER (WHERE over_budget)::int AS over_budget_requests")
@@ -80,7 +82,7 @@ def summary(conn, group: str, days: int = 30, client: str | None = None, alias: 
 
 
 def recent(conn, limit: int = 50, errors_only: bool = False) -> list[dict]:
-    rows = conn.execute("SELECT id, created_at, client_name, endpoint, alias, provider_name, upstream_model, total_tokens, estimated, "
+    rows = conn.execute("SELECT id, created_at, client_name, endpoint, alias, provider_name, upstream_model, total_tokens, reasoning_tokens, estimated, "
                         "cost_usd::float AS cost_usd, latency_ms, status, error_class, attempts, over_budget FROM usage_event "
                         "WHERE (NOT %s OR status >= 400) ORDER BY id DESC LIMIT %s", (errors_only, limit)).fetchall()
     conn.rollback()
@@ -119,7 +121,7 @@ def _safe_cell(v):
 
 def to_csv(rows: list[dict], group: str) -> str:
     out = io.StringIO()
-    cols = ["key", "requests", "errors", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_requests", "cost_usd",
+    cols = ["key", "requests", "errors", "prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "estimated_requests", "cost_usd",
             "avg_latency_ms", "p95_latency_ms", "over_budget_requests"]
     w = csv.writer(out)
     w.writerow([group if c == "key" else c for c in cols])

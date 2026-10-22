@@ -656,3 +656,186 @@ def test_migrations_are_idempotent(client):
         conn.execute(SQL)
         conn.commit()
     assert metrics is not None
+
+
+# ---- extra_body (thinking switches), reasoning tokens, reasoning-only replies -------------------------------------------------
+def put_alias(client, op, alias, targets, kind="chat"):
+    return client.put(f"/api/models/{alias}", headers=op, json={"kind": kind, "targets": targets})
+
+
+def body_of(upstream, i=-1):
+    return json.loads(upstream.calls[i].content)
+
+
+def test_extra_body_roundtrip_and_validation_over_the_api(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    eb = {"reasoning": {"enabled": False}}
+    r = put_alias(client, op, "qwen", [{"provider_id": pid, "upstream_model": "qwen/q", "extra_body": eb}, {"provider_id": pid, "upstream_model": "b"}])
+    assert r.status_code == 200 and [t["extra_body"] for t in r.json()["targets"]] == [eb, {}]
+    got = next(a for a in client.get("/api/models", headers=op).json()["items"] if a["alias"] == "qwen")
+    assert [t["extra_body"] for t in got["targets"]] == [eb, {}]
+    # replacing without the field clears it
+    r = put_alias(client, op, "qwen", [{"provider_id": pid, "upstream_model": "qwen/q"}])
+    assert r.json()["targets"][0]["extra_body"] == {}
+    put_alias(client, op, "qwen", [{"provider_id": pid, "upstream_model": "qwen/q", "extra_body": eb}])
+    for bad in ({"model": "x"}, {"messages": []}, {"input": "x"}, {"stream": True}, {"user": "u"}, {"n": 2}, [], "str", 3, {"a": {"b": {"c": {"d": {"e": 1}}}}},
+                {"v": "x" * 5000}):
+        r = put_alias(client, op, "qwen", [{"provider_id": pid, "upstream_model": "m", "extra_body": bad}])
+        assert r.status_code == 422, bad
+    # nothing was saved by the rejected attempts
+    got = next(a for a in client.get("/api/models", headers=op).json()["items"] if a["alias"] == "qwen")
+    assert got["targets"][0]["extra_body"] == eb and got["targets"][0]["upstream_model"] == "qwen/q"
+
+
+def test_extra_body_reaches_the_upstream_and_wins_over_the_client(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    add_alias(client, op, "x", [(pid, "m")])     # no extra_body: nothing added
+    _, key = add_client(client, op)
+    upstream.hosts["llm1.example.test"] = chat_ok()
+    ask(client, key, model="x", max_tokens=8)
+    assert body_of(upstream) == {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8, "model": "m"}
+    r = put_alias(client, op, "x", [{"provider_id": pid, "upstream_model": "m",
+                                     "extra_body": {"reasoning": {"enabled": False}, "max_tokens": 900, "temperature": 0}}])
+    assert r.status_code == 200
+    assert ask(client, key, model="x", max_tokens=8, temperature=1.0).status_code == 200
+    sent = body_of(upstream)
+    assert sent["reasoning"] == {"enabled": False} and sent["max_tokens"] == 900 and sent["temperature"] == 0     # operator wins
+    assert sent["model"] == "m" and sent["messages"] == [{"role": "user", "content": "hi"}]
+    # a different target of the same alias gets its own fields
+    p2 = add_provider(client, op, name="up2", host="llm2.example.test")
+    upstream.hosts["llm2.example.test"] = chat_ok()
+    put_alias(client, op, "x", [{"provider_id": pid, "upstream_model": "m", "extra_body": {"reasoning": {"enabled": False}}},
+                                {"provider_id": p2, "upstream_model": "n", "extra_body": {"reasoning_effort": "low"}}])
+    upstream.hosts["llm1.example.test"] = httpx.Response(503, text="down")
+    assert ask(client, key, model="x").status_code == 200
+    first, second = body_of(upstream, -2), body_of(upstream, -1)
+    assert "reasoning_effort" not in first and first["reasoning"] == {"enabled": False}
+    assert second["reasoning_effort"] == "low" and "reasoning" not in second and second["model"] == "n"
+    assert UPSTREAM_KEY not in json.dumps([body_of(upstream, i) for i in range(len(upstream.calls))])
+
+
+def test_extra_body_on_embeddings_is_allowed_but_reserved_keys_stay_blocked(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    r = put_alias(client, op, "emb", [{"provider_id": pid, "upstream_model": "e", "extra_body": {"truncate": "END", "input": "x"}}], kind="embedding")
+    assert r.status_code == 422
+    r = put_alias(client, op, "emb", [{"provider_id": pid, "upstream_model": "e", "extra_body": {"truncate": "END", "input_type": "query"}}], kind="embedding")
+    assert r.status_code == 200
+    _, key = add_client(client, op)
+    upstream.hosts["llm1.example.test"] = httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1]}], "usage": {"prompt_tokens": 2, "total_tokens": 2}})
+    assert client.post("/v1/embeddings", headers=key, json={"model": "emb", "input": "hello"}).status_code == 200
+    assert body_of(upstream) == {"input": "hello", "truncate": "END", "input_type": "query", "model": "e"}
+
+
+def test_echo_provider_ignores_extra_body_end_to_end(client, op):
+    pid = next(p["id"] for p in client.get("/api/providers", headers=op).json()["items"] if p["kind"] == "echo")
+    _, key = add_client(client, op)
+    plain = ask(client, key, "same text", model="echo-chat").json()
+    assert put_alias(client, op, "echo2", [{"provider_id": pid, "upstream_model": "echo-1", "extra_body": {"reasoning": {"enabled": False}}}]).status_code == 200
+    out = ask(client, key, "same text", model="echo2").json()
+    assert out["choices"] == plain["choices"] and out["usage"] == plain["usage"]
+
+
+def test_extra_body_audit_entry_and_never_secrets(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    eb = {"reasoning": {"enabled": False}}
+    put_alias(client, op, "qwen", [{"provider_id": pid, "upstream_model": "m", "extra_body": eb}])
+    put_alias(client, op, "qwen", [{"provider_id": pid, "upstream_model": "m", "extra_body": eb}])     # unchanged
+    put_alias(client, op, "qwen", [{"provider_id": pid, "upstream_model": "m"}])                       # cleared
+    put_alias(client, op, "plain", [{"provider_id": pid, "upstream_model": "m"}])                      # never had any
+    items = client.get("/api/audit", headers=op).json()["items"]
+    mine = [i for i in items if i["action"].startswith("model.") and i["target"] == "qwen"][::-1]
+    assert [i["action"] for i in mine] == ["model.create", "model.update", "model.update"]
+    assert mine[0]["detail"]["extra_body"] == {"1": eb} and mine[0]["detail"]["extra_body_changed"] is True
+    assert mine[1]["detail"]["extra_body_changed"] is False
+    assert mine[2]["detail"]["extra_body"] == {} and mine[2]["detail"]["extra_body_changed"] is True
+    plain = next(i for i in items if i["target"] == "plain")
+    assert "extra_body" not in plain["detail"]
+    assert UPSTREAM_KEY not in json.dumps(items, default=str)
+
+
+def test_reasoning_tokens_are_recorded_and_shown(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    add_alias(client, op, "qwen", [(pid, "m")])
+    _, key = add_client(client, op)
+    upstream.hosts["llm1.example.test"] = chat_ok(content="OK", usage={"prompt_tokens": 9, "completion_tokens": 143, "total_tokens": 152,
+                                                                       "completion_tokens_details": {"reasoning_tokens": 139}})
+    series = 'llmgw_tokens_total{alias="qwen",client="trustdesk",kind="reasoning"}'
+    before = metric(client, op, series)
+    assert ask(client, key, model="qwen").status_code == 200
+    assert usage_rows()[-1]["reasoning_tokens"] == 139
+    assert metric(client, op, series) - before == 139
+    upstream.hosts["llm1.example.test"] = chat_ok(content="OK", usage={"prompt_tokens": 9, "completion_tokens": 3})
+    ask(client, key, model="qwen")
+    assert usage_rows()[-1]["reasoning_tokens"] is None                      # not reported: null, not 0
+    by_alias = client.get("/api/usage?group=alias", headers=op).json()["items"]
+    assert by_alias[0]["reasoning_tokens"] == 139 and by_alias[0]["completion_tokens"] == 146
+    recent = client.get("/api/usage/recent", headers=op).json()["items"]
+    assert [r["reasoning_tokens"] for r in recent] == [None, 139]
+    assert client.get("/api/overview", headers=op).json()["totals"]["reasoning_tokens"] == 139
+    assert "reasoning_tokens" in client.get("/api/usage.csv?group=alias", headers=op).text.splitlines()[0].split(",")
+
+
+def test_reasoning_only_reply_passes_through_with_a_note_and_a_metric(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    add_alias(client, op, "qwen", [(pid, "m")])
+    _, key = add_client(client, op)
+    msg = {"role": "assistant", "content": "", "reasoning": "Let me think", "reasoning_content": "Let me think"}
+    thinking = {"id": "x", "object": "chat.completion", "model": "m", "usage": {"prompt_tokens": 9, "completion_tokens": 8},
+                "choices": [{"index": 0, "finish_reason": "length", "message": dict(msg)}]}
+    series = 'llmgw_empty_content_total{alias="qwen"}'
+    before = metric(client, op, series)
+    upstream.hosts["llm1.example.test"] = httpx.Response(200, json=thinking)
+    r = ask(client, key, model="qwen", max_tokens=8)
+    assert r.status_code == 200 and r.headers["x-llmgw-note"] == "empty-content-reasoning-only"
+    got = r.json()
+    assert got["choices"][0]["message"] == msg and got["choices"][0]["finish_reason"] == "length"   # unchanged
+    assert metric(client, op, series) - before == 1
+    thinking["choices"][0]["message"]["content"] = None          # a null content counts too
+    upstream.hosts["llm1.example.test"] = httpx.Response(200, json=thinking)
+    assert ask(client, key, model="qwen").headers["x-llmgw-note"] == "empty-content-reasoning-only"
+    assert metric(client, op, series) - before == 2
+    # a real answer, even with reasoning attached, gets no note; neither does an empty answer with no reasoning
+    for content, extra in (("OK", {"reasoning": "hm"}), ("", {})):
+        thinking["choices"][0]["message"] = {"role": "assistant", "content": content, **extra}
+        upstream.hosts["llm1.example.test"] = httpx.Response(200, json=thinking)
+        r = ask(client, key, model="qwen")
+        assert r.status_code == 200 and "x-llmgw-note" not in r.headers
+    assert metric(client, op, series) - before == 2
+    assert 'llmgw_empty_content_total{alias="nope' not in client.get("/metrics", headers=op).text      # labels come from operator-made aliases only
+
+
+def test_upgrade_from_the_previous_schema_keeps_data_and_is_repeatable():
+    """Apply 001 to a fresh schema, add rows, then run the later migrations: rows keep working, defaults fill in, a rerun is harmless."""
+    import os
+
+    import psycopg
+
+    files = sorted(migrate.MIGRATIONS.glob("*.sql"))
+    assert files[0].name == "001_init.sql" and len(files) >= 2
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS upg CASCADE")
+        conn.execute("CREATE SCHEMA upg")
+        try:
+            conn.execute("SET search_path TO upg")
+            conn.execute(files[0].read_text())
+            conn.execute("INSERT INTO provider (name, kind) VALUES ('echo','echo')")
+            conn.execute("INSERT INTO model_alias (alias, kind) VALUES ('a','chat')")
+            conn.execute("INSERT INTO alias_target (alias, position, provider_id, upstream_model) VALUES ('a',0,1,'echo-1')")
+            conn.execute("INSERT INTO usage_event (client_name, endpoint, status) VALUES ('c','chat/completions',200)")
+            for _ in range(2):                              # twice: idempotent
+                for f in files[1:]:
+                    conn.execute(f.read_text())
+            assert conn.execute("SELECT extra_body::text FROM alias_target").fetchone()[0] == "{}"
+            assert conn.execute("SELECT reasoning_tokens FROM usage_event").fetchone()[0] is None
+            conn.execute("INSERT INTO alias_target (alias, position, provider_id, upstream_model) VALUES ('a',1,1,'m2')")   # old-style insert still works
+            assert conn.execute("SELECT extra_body::text FROM alias_target WHERE position=1").fetchone()[0] == "{}"
+        finally:
+            conn.execute("SET search_path TO public")
+            conn.execute("DROP SCHEMA upg CASCADE")
+    assert migrate.run() == []        # the real schema is already up to date: nothing is applied twice
+
+
+def test_old_put_shape_without_extra_body_still_works(client, op):
+    pid = next(p["id"] for p in client.get("/api/providers", headers=op).json()["items"] if p["kind"] == "echo")
+    r = client.put("/api/models/legacy", headers=op, json={"kind": "chat", "targets": [{"provider_id": pid, "upstream_model": "echo-1"}]})
+    assert r.status_code == 200 and r.json()["targets"][0]["extra_body"] == {}

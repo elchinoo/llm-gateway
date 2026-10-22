@@ -1,5 +1,7 @@
 """Operator API (/api): providers, model aliases, clients and their keys, usage, audit and settings. Every route names the
 permission it needs (see core.PERMISSIONS). Keys are returned once, at creation, and never again."""
+from typing import Any
+
 from apgkit.auth import Principal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -37,6 +39,8 @@ class TestBody(_B):
 class TargetBody(_B):
     provider_id: int
     upstream_model: str = Field(min_length=1, max_length=120)
+    extra_body: Any = Field(None, description="operator-set JSON object merged into the upstream request (wins over the client's fields); "
+                                              "validated by aliases.validate_extra_body")
 
 
 class AliasBody(_B):
@@ -85,6 +89,22 @@ class SettingsBody(_B):
 
 def _bad(exc: Exception, code: int = 422) -> HTTPException:
     return HTTPException(code, str(exc))
+
+
+def _extra_bodies(conn, alias: str) -> list[dict]:
+    try:
+        return [t["extra_body"] for t in aliases.get(conn, alias)["targets"]]
+    except aliases.AliasError:
+        return []
+
+
+def _extra_audit(before: list[dict], targets: list[TargetBody]) -> dict:
+    """What the audit trail says about extra_body: the operator's own non-secret request fields, only when there are or were any
+    (a provider's key can never be in it, and the docs tell operators not to paste one)."""
+    after = [aliases.validate_extra_body(t.extra_body) for t in targets]
+    if not any(after) and not any(before):
+        return {}
+    return {"extra_body": {str(i + 1): v for i, v in enumerate(after) if v}, "extra_body_changed": after != before}
 
 
 def build_router(require) -> APIRouter:
@@ -150,13 +170,15 @@ def build_router(require) -> APIRouter:
         with connect() as conn:
             dim = body.embedding_dim or cfg.get_all(conn)["default_embedding_dim"]
             try:
+                before = _extra_bodies(conn, alias)
                 created = aliases.upsert(conn, alias, kind=body.kind, description=body.description, enabled=body.enabled, embedding_dim=dim,
                                          price_prompt_per_m=body.price_prompt_per_m, price_completion_per_m=body.price_completion_per_m,
                                          targets=[t.model_dump() for t in body.targets])
             except aliases.AliasError as exc:
                 raise _bad(exc) from exc
             audit.log(conn, p.actor, "model.create" if created else "model.update", alias, kind=body.kind, enabled=body.enabled,
-                      targets=[f"{t.provider_id}:{t.upstream_model}" for t in body.targets], price_prompt_per_m=body.price_prompt_per_m,
+                      targets=[f"{t.provider_id}:{t.upstream_model}" for t in body.targets], **_extra_audit(before, body.targets),
+                      price_prompt_per_m=body.price_prompt_per_m,
                       price_completion_per_m=body.price_completion_per_m, embedding_dim=dim)
             return aliases.get(conn, alias)
 

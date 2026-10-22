@@ -1,21 +1,66 @@
 """Model aliases: the name a client asks for, mapped to an ordered list of (provider, upstream model) targets."""
+import json
+import math
 import re
+
+from psycopg.types.json import Jsonb
 
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,59}$")
 MAX_TARGETS = 5
+# extra_body: operator-set request fields merged into the upstream body. These keys belong to the gateway and can never be set.
+EXTRA_BODY_RESERVED = frozenset({"model", "messages", "input", "stream", "user", "n"})
+EXTRA_BODY_MAX_BYTES = 4096
+EXTRA_BODY_MAX_DEPTH = 4
 
 
 class AliasError(ValueError):
     pass
 
 
+def _depth(value, level: int = 1) -> int:
+    """Nesting depth counted in objects/lists: the top-level object is 1, {"a": {"b": 1}} is 2."""
+    if isinstance(value, dict):
+        return max([_depth(v, level + 1) for v in value.values()] + [level])
+    if isinstance(value, list):
+        return max([_depth(v, level + 1) for v in value] + [level])
+    return level - 1
+
+
+def _plain_json(value) -> bool:
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _plain_json(v) for k, v in value.items())
+    if isinstance(value, list):
+        return all(_plain_json(v) for v in value)
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return value is None or isinstance(value, (str, bool, int))
+
+
+def validate_extra_body(value) -> dict:
+    """Return the operator's extra request fields as a plain dict, or raise AliasError. None means none ({})."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise AliasError("extra_body must be a JSON object, for example {\"reasoning\": {\"enabled\": false}}")
+    if not _plain_json(value):
+        raise AliasError("extra_body may contain only plain JSON values (objects, lists, strings, numbers, booleans, null)")
+    reserved = sorted(EXTRA_BODY_RESERVED & set(value))
+    if reserved:
+        raise AliasError(f"extra_body cannot set {', '.join(reserved)}: the gateway owns those fields")
+    if _depth(value) > EXTRA_BODY_MAX_DEPTH:
+        raise AliasError(f"extra_body is nested too deeply (at most {EXTRA_BODY_MAX_DEPTH} levels)")
+    if len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()) > EXTRA_BODY_MAX_BYTES:
+        raise AliasError(f"extra_body is larger than {EXTRA_BODY_MAX_BYTES // 1024} KB")
+    return value
+
+
 def list_aliases(conn) -> list[dict]:
     rows = conn.execute("SELECT * FROM model_alias ORDER BY alias").fetchall()
-    targets = conn.execute("SELECT t.alias, t.position, t.provider_id, t.upstream_model, p.name AS provider_name, p.kind AS provider_kind, "
+    targets = conn.execute("SELECT t.alias, t.position, t.provider_id, t.upstream_model, t.extra_body, p.name AS provider_name, p.kind AS provider_kind, "
                            "p.enabled AS provider_enabled FROM alias_target t JOIN provider p ON p.id = t.provider_id "
                            "ORDER BY t.alias, t.position").fetchall()
     for r in rows:
-        r["targets"] = [{k: t[k] for k in ("position", "provider_id", "upstream_model", "provider_name", "provider_kind", "provider_enabled")}
+        r["targets"] = [{k: t[k] for k in ("position", "provider_id", "upstream_model", "extra_body", "provider_name", "provider_kind", "provider_enabled")}
                         for t in targets if t["alias"] == r["alias"]]
         for k in ("price_prompt_per_m", "price_completion_per_m"):
             r[k] = float(r[k]) if r[k] is not None else None
@@ -38,6 +83,7 @@ def upsert(conn, alias: str, *, kind: str, description: str, enabled: bool, embe
         raise AliasError("kind must be 'chat' or 'embedding'")
     if not 1 <= len(targets) <= MAX_TARGETS:
         raise AliasError(f"an alias needs between 1 and {MAX_TARGETS} targets")
+    targets = [{**t, "extra_body": validate_extra_body(t.get("extra_body"))} for t in targets]
     for t in targets:
         if not conn.execute("SELECT 1 FROM provider WHERE id=%s", (t["provider_id"],)).fetchone():
             raise AliasError(f"provider {t['provider_id']} does not exist")
@@ -50,8 +96,8 @@ def upsert(conn, alias: str, *, kind: str, description: str, enabled: bool, embe
         (alias, kind, description.strip(), enabled, embedding_dim, price_prompt_per_m, price_completion_per_m))
     conn.execute("DELETE FROM alias_target WHERE alias=%s", (alias,))
     for i, t in enumerate(targets):
-        conn.execute("INSERT INTO alias_target (alias, position, provider_id, upstream_model) VALUES (%s,%s,%s,%s)",
-                     (alias, i, t["provider_id"], t["upstream_model"].strip()))
+        conn.execute("INSERT INTO alias_target (alias, position, provider_id, upstream_model, extra_body) VALUES (%s,%s,%s,%s,%s)",
+                     (alias, i, t["provider_id"], t["upstream_model"].strip(), Jsonb(t["extra_body"])))
     conn.commit()
     return not existed
 

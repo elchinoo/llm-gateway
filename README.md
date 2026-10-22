@@ -33,8 +33,8 @@ model to another by editing an alias). Built on [agentpg-kit](https://github.com
 - **Dashboard** at `/`: Overview (usage per day, per client, spend against budget, top models, errors), Clients, Models,
   Providers, Audit (who changed what, never secrets), Settings, and Connect (copy-paste setup for each app, plus curl).
 - **Prometheus** at `/metrics`: the fleet's shared families plus `llmgw_requests_total{client,alias,status}`,
-  `llmgw_tokens_total{client,alias,kind}`, `llmgw_upstream_latency_seconds{provider}`, `llmgw_budget_rejections_total{client}`
-  and `llmgw_failovers_total`.
+  `llmgw_tokens_total{client,alias,kind}` (kind: prompt, completion, reasoning), `llmgw_upstream_latency_seconds{provider}`,
+  `llmgw_budget_rejections_total{client}`, `llmgw_failovers_total` and `llmgw_empty_content_total{alias}`.
 - **Sign-in:** standalone (a setup code and an admin password) or **single sign-on** with the identity provider, with roles.
 
 ## Quick start
@@ -154,13 +154,47 @@ No Postgres extension is needed. A sandbox that pauses itself answers an empty `
 a restart the vault is locked until you sign in (or `LLMGW_ENCRYPTION_KEY` is set), and while it is locked **real providers answer
 503 `vault_locked` but the built-in echo models keep working**. AgentPG sandboxes speak HTTP and Postgres only, which is all this needs.
 
+## Thinking models (reasoning on or off, per target)
+
+Some models "think" before they answer: the reasoning is generated as completion tokens that count against `max_tokens`. Measured
+on a Qwen3 model through OpenRouter, the request "Reply with the single word OK." cost 143 completion tokens, 139 of them
+reasoning. An app that sends a small `max_tokens` (8 to 64, or about 700 for a strict JSON verdict) gets the budget eaten by the
+thinking and receives an **empty `content`** with `finish_reason: "length"`.
+
+The fix belongs to the operator, not to every app. Each alias target has **Extra request fields (JSON)**: a JSON object the
+gateway merges into the request it sends to *that* target (chat and embeddings), after the app's own fields. Edit it on the
+Models page (three one-click presets) or send `extra_body` in `PUT /api/models/{alias}`:
+
+| Preset (Models page) | `extra_body` | For |
+|---|---|---|
+| Turn thinking off: OpenRouter | `{"reasoning": {"enabled": false}}` | OpenRouter |
+| Turn thinking off: vLLM/SGLang (Qwen3) | `{"chat_template_kwargs": {"enable_thinking": false}}` | vLLM, SGLang serving Qwen3 |
+| Limit reasoning: OpenAI style | `{"reasoning_effort": "low"}` | OpenAI-style reasoning models |
+
+Other spellings work the same way, for example `{"thinking": {"type": "disabled"}}`. Rules:
+
+- **The operator wins.** The merge is shallow and happens after the app's fields, so an `extra_body` key replaces a same-named
+  field the app sent (an `extra_body` of `{"max_tokens": 512}` overrides the app's `max_tokens`).
+- **Reserved keys are refused** when you save: `model`, `messages`, `input`, `stream`, `user`, `n`. The object must be at most
+  4 KB, nested at most 4 levels, and plain JSON. Targets are independent, so a failover target can carry different fields.
+- The built-in `echo` provider ignores it. Provider API keys are never part of it (they live encrypted on the provider), and it
+  is recorded in the audit trail as written, so do not paste a secret into it.
+- **See the cost.** When the provider reports `usage.completion_tokens_details.reasoning_tokens`, the gateway stores it in the usage
+  row's `reasoning_tokens` (null when not reported; it is already inside `completion_tokens`), shows it as "Thinking" on the
+  Overview and exposes it in `/api/usage`, `/api/usage/recent` and the CSV, and in `llmgw_tokens_total{kind="reasoning"}`.
+- **A thinking-only answer is flagged, not changed.** If the provider answers 200 with an empty or null `content` while a
+  `reasoning` or `reasoning_content` field is present, the response passes through unchanged (the app decides what to do), with
+  the header `x-llmgw-note: empty-content-reasoning-only`, and `llmgw_empty_content_total{alias}` counts it. Alert on that counter
+  to find aliases that need thinking turned off or a larger `max_tokens`.
+
 ## Limits worth knowing (read these)
 
 - **No streaming.** `stream: true` is a 400. The fleet's apps never stream, so the gateway reads the whole answer, caps it
   (8 MB), and meters it exactly. `stream: false` is accepted.
 - **A small, fixed field allow-list.** Only `model, messages, max_tokens, temperature, top_p, stop, response_format, seed,
   presence_penalty, frequency_penalty, n` (1 only), and for embeddings `input, dimensions, encoding_format` are forwarded.
-  Anything else (tools, `user`, provider-specific fields) is a 400. Messages carry text only.
+  Anything else (tools, `user`, provider-specific fields) is a 400. Messages carry text only. Provider-specific fields are set by
+  the operator per alias target instead (see Thinking models).
 - **The requests-per-minute limit is in memory and per process.** With several replicas a client can reach N times its limit;
   put a proxy limit in front if that matters. Failed-key attempts are limited the same way (30 per minute per address).
 - **Token counts are the provider's own `usage` when it sends one.** Otherwise they are **estimates** (characters divided by 4,
@@ -177,7 +211,7 @@ a restart the vault is locked until you sign in (or `LLMGW_ENCRYPTION_KEY` is se
 
 ```bash
 make lint
-make test                                     # no database needed: validation, token maths, echo provider, rate window
+make test                                     # no database needed: validation, token maths, echo provider, rate window, UI fake-DOM (needs node)
 make test-db                                  # the whole gateway against Postgres (needs POSTGRES_PASSWORD exported)
 ```
 
