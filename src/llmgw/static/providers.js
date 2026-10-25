@@ -1,6 +1,6 @@
 import { api } from "/kit/api.js";
 import { can } from "/kit/session.js";
-import { $, field, fill, h, toast } from "/kit/ui.js";
+import { $, confirmDialog, field, fill, h, toast } from "/kit/ui.js";
 
 export async function initProviders() {
   const box = $("view-providers");
@@ -18,7 +18,7 @@ export async function initProviders() {
         h("td", { class: "actions" }, manage ? [h("button", { class: "secondary small", type: "button", onclick: () => testProvider(x) }, "Test"), " ",
           h("button", { class: "secondary small", type: "button", onclick: () => editProvider(d, x) }, "Edit"), " ",
           h("button", { class: "danger small", type: "button", onclick: async () => {
-            if (!confirm(`Delete "${x.name}"?`)) return;
+            if (!(await confirmDialog(`Delete "${x.name}"?`, { title: "Delete provider", confirmLabel: "Delete", danger: true }))) return;
             try { await api(`/api/providers/${x.id}`, { method: "DELETE" }); initProviders(); } catch (e) { toast(e.message, true); }
           } }, "Delete")] : null))))),
       d.items.length ? null : h("p", { class: "empty" }, "No providers yet.")));

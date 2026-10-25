@@ -1,6 +1,6 @@
 import { api } from "/kit/api.js";
 import { can } from "/kit/session.js";
-import { $, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
+import { $, confirmDialog, copy, field, fill, fmtDate, h, promptDialog, toast } from "/kit/ui.js";
 import { compact, meter, num, usd } from "/static/common.js";
 
 const optInt = (v) => (v === "" || v == null ? null : Number(v));
@@ -114,11 +114,11 @@ async function openClient(id, revealed) {
     h("table", {}, h("thead", {}, h("tr", {}, ...["Key", "Name", "Created", "Last used", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, keys.items.map((k) => h("tr", {}, h("td", {}, h("code", {}, `${k.prefix}…`)), h("td", {}, k.name), h("td", {}, fmtDate(k.created_at)), h("td", {}, fmtDate(k.last_used_at)),
         h("td", { class: "actions" }, status(k) || (manage ? [h("button", { class: "secondary small", type: "button", onclick: async () => {
-          const grace = prompt("Rotate: issue a new key and revoke this one. Minutes to keep the old key working so the app can switch (0 = revoke now):", "10");
+          const grace = await promptDialog("Rotate: issue a new key and revoke this one. Minutes to keep the old key working so the app can switch (0 = revoke now):", { title: "Rotate key", label: "Grace minutes", inputType: "number", min: 0, defaultValue: "10", required: true, confirmLabel: "Rotate" });
           if (grace === null) return;
           try { const r = await api(`/api/clients/${id}/keys/${k.id}/rotate`, { method: "POST", json: { grace_minutes: Number(grace) || 0 } }); initClients(); openClient(id, { title: "Rotated: this is the new key.", key: r.key }); } catch (ex) { toast(ex.message, true); }
         } }, "Rotate"), " ", h("button", { class: "danger small", type: "button", onclick: async () => {
-          if (!confirm("Revoke this key? The app using it stops working immediately.")) return;
+          if (!(await confirmDialog("Revoke this key? The app using it stops working immediately.", { title: "Revoke key", confirmLabel: "Revoke", danger: true }))) return;
           try { await api(`/api/clients/${id}/keys/${k.id}`, { method: "DELETE" }); reload(); } catch (ex) { toast(ex.message, true); }
         } }, "Revoke")] : null)))))));
   fill($("detail-body"),
@@ -126,7 +126,7 @@ async function openClient(id, revealed) {
     h("p", { class: "muted" }, `This month: ${num(c.tokens_month)} tokens, ${num(c.requests_month)} requests, ${usd(c.cost_month)} estimated. A service token from the identity provider is accepted for this client when its subject is "${c.name}".`),
     keyCard, form,
     manage ? h("div", { class: "btns" }, h("button", { class: "danger", type: "button", onclick: async () => {
-      if (!confirm(`Delete "${c.name}" and all its keys? Its usage history stays, unattributed.`)) return;
+      if (!(await confirmDialog(`Delete "${c.name}" and all its keys? Its usage history stays, unattributed.`, { title: "Delete client", confirmLabel: "Delete", danger: true }))) return;
       try { await api(`/api/clients/${id}`, { method: "DELETE" }); $("detail").close(); initClients(); } catch (ex) { toast(ex.message, true); }
     } }, "Delete client")) : null);
 }

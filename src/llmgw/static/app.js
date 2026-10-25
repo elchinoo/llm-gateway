@@ -1,5 +1,5 @@
 import { api } from "/kit/api.js";
-import { can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
+import { bootSession, can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
 import { $, h } from "/kit/ui.js";
 import { initAudit } from "/static/audit.js";
 import { initClients } from "/static/clients.js";
@@ -16,24 +16,15 @@ const SECTIONS = ["auth-card", "vault-banner", "nav", "signout", ...TABS.map((t)
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
 
-function showUnavailable(err) {
-  hideAll();
-  $("auth-card").replaceChildren(
-    h("img", { class: "hero-logo", src: "/static/logo.svg", alt: "", width: "72", height: "72" }),
-    h("h1", {}, "The gateway can't be reached"),
-    h("p", { class: "muted" }, err.message),
-    h("p", { class: "hint" }, "If this server runs on a platform that pauses idle apps, resume it first (for AgentPG: agentpg sandbox resume <sandbox-id>), then retry."),
-    h("button", { class: "primary", type: "button", onclick: () => boot() }, "Retry"));
-  $("auth-card").hidden = false;
-}
-
 async function boot(notice = "") {
   hideAll();
-  let s;
-  try { s = await refreshSession(); } catch (err) { showUnavailable(err); return; }
-  if (s.state === "setup_required") renderSetup(() => boot(), "the LLM gateway");
-  else if (s.state === "logged_out") renderLogin(() => boot(), notice, "the LLM gateway");
-  else showApp();
+  $("auth-card").hidden = false;   // bootSession paints the loading state (and a retry on failure) here
+  const s = await bootSession($("auth-card"), { text: "Loading\u2026", onReady: (s) => {
+    if (s.state === "setup_required") renderSetup(() => boot(), "the LLM gateway");
+    else if (s.state === "logged_out") renderLogin(() => boot(), notice, "the LLM gateway");
+    else showApp();
+  } });
+  if (!s) $("auth-card").append(h("p", { class: "hint" }, "If this server runs on a platform that pauses idle apps, resume it first (for AgentPG: agentpg sandbox resume <sandbox-id>), then retry."));
 }
 
 function showApp() {

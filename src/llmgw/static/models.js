@@ -1,6 +1,6 @@
 import { api } from "/kit/api.js";
 import { can } from "/kit/session.js";
-import { $, field, fill, h, toast } from "/kit/ui.js";
+import { $, confirmDialog, field, fill, h, toast } from "/kit/ui.js";
 import { PRESETS, parseExtraBody, pretty } from "/static/extrabody.js";
 
 const price = (v) => (v == null ? "n/a" : `$${v}`);
@@ -70,7 +70,7 @@ function editAlias(m, p, a) {
   h("p", { class: "hint" }, "Extra request fields are set by you and merged into the request sent to that target, after the app's own fields, so they win. Use them to turn a thinking model's reasoning off or down. They cannot set model, messages, input, stream, user or n, and must never hold a secret."), rows, h("label", { class: "check" }, enabled, " Enabled"),
   h("button", { class: "primary", type: "submit" }, "Save"),
   a ? h("button", { class: "danger", type: "button", onclick: async () => {
-    if (!confirm(`Delete "${a.alias}"? Apps asking for it will get 404.`)) return;
+    if (!(await confirmDialog(`Delete "${a.alias}"? Apps asking for it will get 404.`, { title: "Delete model alias", confirmLabel: "Delete", danger: true }))) return;
     try { await api(`/api/models/${encodeURIComponent(a.alias)}`, { method: "DELETE" }); $("form").close(); initModels(); } catch (ex) { err.textContent = ex.message; }
   } }, "Delete") : null, err));
   $("form").showModal();
