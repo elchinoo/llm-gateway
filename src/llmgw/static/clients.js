@@ -13,7 +13,7 @@ export async function initClients() {
   fill(box,
     h("div", { class: "row" }, h("h1", {}, "Clients"), can("clients:manage") ? h("button", { class: "primary", type: "button", onclick: () => newClient(list) }, "New client") : null),
     h("p", { class: "muted" }, "A client is one app that uses the gateway (TrustDesk, PagerLens, PayBroker...). It has its own revocable keys, the models it may use, a requests-per-minute limit and a monthly token budget."),
-    h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Client", "Models", "Limit", "This month", "Budget", "Keys", "Status"].map((t) => h("th", {}, t)))),
+    h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Client", "Models", "Limit", "This month", "Budget", "Keys", "Status"].map((t) => h("th", {}, t || h("span", { class: "sr-only" }, "Actions"))))),
       h("tbody", {}, list.items.map((c) => h("tr", { class: "clickable", tabindex: "0", onclick: () => openClient(c.id), onkeydown: (e) => { if (e.key === "Enter") openClient(c.id); } },
         h("td", { class: "title" }, c.name), h("td", { class: "wrap" }, c.allowed_aliases.includes("*") ? "all" : c.allowed_aliases.join(", ")),
         h("td", {}, c.rpm_limit ? `${c.rpm_limit}/min` : "unlimited"),
@@ -111,7 +111,7 @@ async function openClient(id, revealed) {
       try { const k = await api(`/api/clients/${id}/keys`, { method: "POST", json: { name: kname.value } }); kname.value = ""; initClients(); openClient(id, { title: "New key.", key: k.key }); } catch (ex) { toast(ex.message, true); }
     } }, field("Name", kname), h("span", {}), h("button", { class: "primary", type: "submit" }, "Issue key")) : null,
     reveal,
-    h("table", {}, h("thead", {}, h("tr", {}, ...["Key", "Name", "Created", "Last used", ""].map((t) => h("th", {}, t)))),
+    h("table", {}, h("thead", {}, h("tr", {}, ...["Key", "Name", "Created", "Last used", ""].map((t) => h("th", {}, t || h("span", { class: "sr-only" }, "Actions"))))),
       h("tbody", {}, keys.items.map((k) => h("tr", {}, h("td", {}, h("code", {}, `${k.prefix}…`)), h("td", {}, k.name), h("td", {}, fmtDate(k.created_at)), h("td", {}, fmtDate(k.last_used_at)),
         h("td", { class: "actions" }, status(k) || (manage ? [h("button", { class: "secondary small", type: "button", onclick: async () => {
           const grace = await promptDialog("Rotate: issue a new key and revoke this one. Minutes to keep the old key working so the app can switch (0 = revoke now):", { title: "Rotate key", label: "Grace minutes", inputType: "number", min: 0, defaultValue: "10", required: true, confirmLabel: "Rotate" });

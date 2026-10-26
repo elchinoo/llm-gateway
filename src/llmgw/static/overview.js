@@ -1,5 +1,5 @@
 import { api } from "/kit/api.js";
-import { $, fill, h } from "/kit/ui.js";
+import { $, fill, h, scrollRegion } from "/kit/ui.js";
 import { compact, hbars, meter, num, svgEl, usd } from "/static/common.js";
 
 let days = 7;
@@ -21,9 +21,9 @@ function dailyBars(rows) {
   return svg;
 }
 
-function table(headers, rows) {
-  return h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...headers.map(([t, cls]) => h("th", { class: cls || false }, t)))),
-    h("tbody", {}, rows)));
+function table(headers, rows, label) {
+  return scrollRegion(h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...headers.map(([t, cls]) => h("th", { class: cls || false }, t)))),
+    h("tbody", {}, rows))), label);
 }
 
 export async function initOverview() {
@@ -50,23 +50,23 @@ export async function initOverview() {
     stat(`${t.p95_latency_ms} ms`, `p95 latency (avg ${t.avg_latency_ms})`),
     stat(num(t.estimated_requests), "with estimated tokens", false)));
   if (!t.requests && !o.clients.length) {
-    parts.push(h("div", { class: "card" }, h("h3", {}, "No traffic yet"),
+    parts.push(h("div", { class: "card" }, h("h2", {}, "No traffic yet"),
       h("p", { class: "muted" }, "Create a client under Clients to get a gateway key, then see Connect for how an app points at this gateway. The built-in echo-chat and echo-embed models need no provider or key, so you can try everything right now.")));
   } else {
     parts.push(h("div", { class: "cols" },
-      h("div", { class: "card" }, h("h3", {}, "Requests per day"), dailyBars(o.daily)),
-      h("div", { class: "card" }, h("h3", {}, "Top models"), o.models.length ? hbars(o.models.map((m) => ({ label: m.key, value: m.total_tokens })), "Tokens per model alias") : h("p", { class: "muted" }, "No requests yet."))));
-    parts.push(h("h3", {}, "Clients: spend against budget"));
+      h("div", { class: "card" }, h("h2", {}, "Requests per day"), dailyBars(o.daily)),
+      h("div", { class: "card" }, h("h2", {}, "Top models"), o.models.length ? hbars(o.models.map((m) => ({ label: m.key, value: m.total_tokens })), "Tokens per model alias") : h("p", { class: "muted" }, "No requests yet."))));
+    parts.push(h("h2", {}, "Clients: spend against budget"));
     parts.push(table([["Client"], ["Requests", "num"], ["Tokens", "num"], ["Est. cost", "num"], ["This month (tokens)", "num"], ["Budget"], ["Errors", "num"]],
       o.clients.map((c) => h("tr", {}, h("td", { class: "title" }, c.name, c.enabled ? null : h("span", { class: "badge bad" }, "disabled")),
         h("td", { class: "num" }, num(c.requests)), h("td", { class: "num" }, compact(c.tokens)), h("td", { class: "num" }, usd(c.cost_usd)),
         h("td", { class: "num" }, compact(c.tokens_month)),
         h("td", {}, c.budget ? [meter(c.budget_used, `${Math.round(c.budget_used * 100)}% of the monthly budget`), ` ${Math.round(c.budget_used * 100)}% of ${compact(c.budget)} `, h("span", { class: "muted" }, c.budget_mode)] : h("span", { class: "muted" }, "no budget")),
-        h("td", { class: "num" }, num(c.errors))))));
+        h("td", { class: "num" }, num(c.errors)))), "Clients: spend against budget"));
     parts.push(h("div", { class: "cols" },
-      h("div", {}, h("h3", {}, "Models"), table([["Alias"], ["Requests", "num"], ["Tokens", "num"], ["Thinking", "num"], ["Est. cost", "num"], ["p95", "num"]],
-        o.models.map((m) => h("tr", {}, h("td", { class: "title" }, m.key), h("td", { class: "num" }, num(m.requests)), h("td", { class: "num" }, compact(m.total_tokens)), h("td", { class: "num" }, compact(m.reasoning_tokens)), h("td", { class: "num" }, usd(m.cost_usd)), h("td", { class: "num" }, `${m.p95_latency_ms} ms`))))),
-      h("div", {}, h("h3", {}, "Errors"), o.errors.length ? table([["Class"], ["Count", "num"]], o.errors.map((e) => h("tr", {}, h("td", {}, e.error_class), h("td", { class: "num" }, num(e.n))))) : h("p", { class: "muted" }, "No errors in this period."))));
+      h("div", {}, h("h2", {}, "Models"), table([["Alias"], ["Requests", "num"], ["Tokens", "num"], ["Thinking", "num"], ["Est. cost", "num"], ["p95", "num"]],
+        o.models.map((m) => h("tr", {}, h("td", { class: "title" }, m.key), h("td", { class: "num" }, num(m.requests)), h("td", { class: "num" }, compact(m.total_tokens)), h("td", { class: "num" }, compact(m.reasoning_tokens)), h("td", { class: "num" }, usd(m.cost_usd)), h("td", { class: "num" }, `${m.p95_latency_ms} ms`))), "Usage by model")),
+      h("div", {}, h("h2", {}, "Errors"), o.errors.length ? table([["Class"], ["Count", "num"]], o.errors.map((e) => h("tr", {}, h("td", {}, e.error_class), h("td", { class: "num" }, num(e.n)))), "Errors by class") : h("p", { class: "muted" }, "No errors in this period."))));
   }
   fill(box, ...parts);
 }

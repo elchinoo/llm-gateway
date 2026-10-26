@@ -35,3 +35,5 @@ dialog .close { position: sticky; float: right; top: 0; z-index: 2; }
 .target { margin-bottom: 1rem; }
 .target textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
 .target .row { flex-wrap: wrap; }
+#view-overview h2 { margin: 0 0 .5rem; font-size: 1.05rem; }
+#view-overview > h2 { margin-top: 1.25rem; }

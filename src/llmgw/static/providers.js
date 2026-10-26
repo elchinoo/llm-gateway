@@ -11,7 +11,7 @@ export async function initProviders() {
   fill(box,
     h("div", { class: "row" }, h("h1", {}, "Providers"), manage ? h("button", { class: "primary", type: "button", onclick: () => editProvider(d, null) }, "Add a provider") : null),
     h("p", { class: "muted" }, "The upstream accounts the gateway calls. Provider keys live only here, encrypted, and are never shown again (only the last 4 characters). Every call re-checks the URL against the SSRF guard. The built-in echo provider needs no network and no key."),
-    h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Name", "Kind", "Base URL", "Key", "Used by", "Status", ""].map((t) => h("th", {}, t)))),
+    h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Name", "Kind", "Base URL", "Key", "Used by", "Status", ""].map((t) => h("th", {}, t || h("span", { class: "sr-only" }, "Actions"))))),
       h("tbody", {}, d.items.map((x) => h("tr", {}, h("td", { class: "title" }, x.name), h("td", {}, x.kind === "echo" ? "echo (built-in)" : "OpenAI-compatible"), h("td", { class: "wrap" }, x.base_url || h("span", { class: "muted" }, "none")),
         h("td", {}, x.kind === "echo" ? h("span", { class: "muted" }, "not needed") : x.has_key ? `…${x.api_key_last4}` : h("span", { class: "muted" }, "no key")),
         h("td", {}, `${x.targets} target${x.targets === 1 ? "" : "s"}`), h("td", {}, h("span", { class: `badge ${x.enabled ? "ok" : "bad"}` }, x.enabled ? "enabled" : "disabled")),

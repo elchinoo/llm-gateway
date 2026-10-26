@@ -19,7 +19,7 @@ export async function initAudit() {
   }
   more.addEventListener("click", load);
   fill(box, h("h1", {}, "Audit"), h("p", { class: "muted" }, "Who changed what and when. Keys and passwords are never recorded here."),
-    h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["When", "Who", "What", "Target", "Details"].map((t) => h("th", {}, t)))), body)), more);
+    h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["When", "Who", "What", "Target", "Details"].map((t) => h("th", {}, t || h("span", { class: "sr-only" }, "Actions"))))), body)), more);
   await load();
   if (!body.children.length) box.insertBefore(h("p", { class: "empty" }, "Nothing has been changed yet."), more);
 }

@@ -39,7 +39,7 @@ async function renderSecurity() {
   const table = h("div", {});
   async function renderTable() {
     const list = await api("/api/tokens");
-    fill(table, list.length ? h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Name", "Token", "Access", "Created", "Last used", ""].map((t) => h("th", {}, t)))),
+    fill(table, list.length ? h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Name", "Token", "Access", "Created", "Last used", ""].map((t) => h("th", {}, t || h("span", { class: "sr-only" }, "Actions"))))),
       h("tbody", {}, list.map((t) => h("tr", {}, h("td", { class: "title" }, t.name), h("td", {}, h("code", {}, `${t.prefix}…`)), h("td", {}, t.scope), h("td", {}, fmtDate(t.created_at)), h("td", {}, fmtDate(t.last_used_at)),
         h("td", { class: "actions" }, t.revoked_at ? h("span", { class: "muted" }, "revoked") : h("button", { class: "danger small", type: "button", onclick: async () => {
           if (!(await confirmDialog(`Revoke "${t.name}"? Anything using it stops working immediately.`, { title: "Revoke token", confirmLabel: "Revoke", danger: true }))) return;
