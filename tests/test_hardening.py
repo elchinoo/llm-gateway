@@ -26,13 +26,13 @@ def ro(client, op, vault_ready, upstream):
     add_client(client, op)                                     # a client with a key (its hash is stored)
     with connect() as c:
         c.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='a1p_readonly') THEN CREATE ROLE a1p_readonly NOLOGIN; END IF; END $$")
-        c.execute(f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{LOGIN}') THEN CREATE ROLE {LOGIN} LOGIN; END IF; END $$")
+        c.execute(f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{LOGIN}') THEN CREATE ROLE {LOGIN} LOGIN PASSWORD 'ro-pw-test'; END IF; END $$")
         c.execute(f"GRANT a1p_readonly TO {LOGIN}")
         c.execute("GRANT USAGE ON SCHEMA public TO a1p_readonly")
         c.execute("GRANT SELECT ON ALL TABLES IN SCHEMA public TO a1p_readonly")
         c.commit()
     migrate.run()
-    conn = psycopg.connect(make_conninfo(os.environ["TEST_DATABASE_URL"], user=LOGIN), row_factory=dict_row, autocommit=True)
+    conn = psycopg.connect(make_conninfo(os.environ["TEST_DATABASE_URL"], user=LOGIN, password="ro-pw-test"), row_factory=dict_row, autocommit=True)
     yield conn
     conn.close()
 
