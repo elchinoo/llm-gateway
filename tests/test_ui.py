@@ -13,7 +13,7 @@ STATIC = Path(__file__).resolve().parents[1] / "src" / "llmgw" / "static"
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-@pytest.mark.parametrize("script", ["models_dom.test.mjs", "dialogs_dom.test.mjs"])
+@pytest.mark.parametrize("script", ["models_dom.test.mjs", "dialogs_dom.test.mjs", "insights_dom.test.mjs"])
 def test_ui_fake_dom(script):
     env = {**os.environ, "STATIC_DIR": str(STATIC), "KIT_DIR": str(Path(apgkit.__file__).resolve().parent / "static")}
     out = subprocess.run(["node", str(JS / script)], env=env, capture_output=True, text=True, timeout=60)

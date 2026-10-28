@@ -2,6 +2,7 @@
 permission it needs (see core.PERMISSIONS). Keys are returned once, at creation, and never again."""
 from typing import Any
 
+from apgkit import insights
 from apgkit.auth import Principal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -305,6 +306,13 @@ def build_router(require) -> APIRouter:
     def usage_recent(limit: int = Query(50, ge=1, le=200), errors_only: bool = False, _: Principal = Depends(require("usage:read"))):
         with connect() as conn:
             return {"items": usage.recent(conn, limit, errors_only)}
+
+    # ---- database insights (EDB query statistics, tuner, advisor; "not available" on plain Postgres) ---------------------
+    @r.get("/insights")
+    def database_insights(order: str = "total", limit: int = Query(20, ge=1, le=200), _: Principal = Depends(require("settings:manage"))):
+        order = order if order in ("total", "mean", "calls") else "total"          # statement text shows table names: admin only
+        with connect() as conn:
+            return insights.insights_payload(conn, order, limit)
 
     # ---- audit and settings -----------------------------------------------------------------------------------
     @r.get("/audit")

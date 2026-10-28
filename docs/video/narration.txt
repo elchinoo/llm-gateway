@@ -1,0 +1,166 @@
+## 1 bf_emma
+Say you run several apps that use AI models.
+Each one holds its own provider key.
+Each one decides which model to call.
+
+...
+
+This is the LLM gateway.
+One place, in front of your model providers, that every app calls instead.
+
+In this video you will see three things.
+An app getting its own key.
+A failing provider being handled.
+And a budget stopping runaway cost.
+
+## 2 bf_emma
+Here is the idea.
+An app sends a normal OpenAI style request to the gateway.
+It carries a key that belongs only to that app.
+
+The gateway checks that key, the app's limits, and which models it may use.
+Then it calls the real provider, with the real provider key.
+That key never leaves the gateway.
+
+Because apps speak the standard OpenAI format, they need no code change.
+Only a new address, and a new key.
+
+## 3 bm_george
+Now, getting set up: on first start, the gateway prints a one-time setup code in its log.
+
+Whoever holds that code chooses the administrator password.
+That password also protects the vault, where provider keys are encrypted.
+So the database alone reveals nothing.
+
+The gateway starts with a built-in demo provider called echo.
+It needs no network and no key.
+So you can try everything without paying for a single token.
+
+## 4 bm_george
+Every app gets its own client.
+I will call this one trustdesk, after the app.
+I allow all models, and sixty requests a minute.
+
+When I create it, the gateway shows the key once.
+Only a hash is stored, so a lost key can only be replaced.
+I copy it.
+
+Now I call the model with plain curl, using that key.
+
+[pause 1.5]
+
+The reply is the echo of my words.
+Notice two things.
+The model name is the alias I asked for, not the provider's internal name.
+And there is a usage block with token counts.
+That is what the gateway meters.
+
+## 5 bm_george
+The app can list the models it may use.
+And it can ask for embeddings.
+Embeddings are the number lists used for search.
+
+The demo returns a vector of seven hundred sixty-eight numbers.
+The same text always gives the same numbers.
+
+Chat and embeddings are what the gateway serves.
+It does not stream answers, and it does not forward tool calls.
+
+## 6 bf_isabella
+Now providers and failover, starting with one that is down.
+
+I add a provider, with its address and key.
+The key goes into the encrypted vault.
+Only its last four characters are ever shown again.
+
+Now I press Test, and the gateway makes one tiny call.
+
+[pause 1.5]
+
+It fails.
+This is my stand-in for an outage.
+
+Next, a model alias.
+Its first target is the failing provider.
+Its second target is the echo provider.
+Targets are tried in order.
+
+## 7 bf_isabella
+Now I call the new alias.
+
+[pause 1.5]
+
+The app gets a good answer, and never knew anything went wrong.
+
+The usage record shows what happened.
+Two attempts, and echo was the provider that answered.
+
+The gateway moves to the next target after a server error, a rate limit, or a timeout.
+It also moves on after a connection problem.
+
+It does not move on after other client errors.
+A different provider would not fix a bad request.
+
+## 8 bm_lewis
+Now, limits and budgets.
+I create a second client, with a tiny budget.
+Forty tokens a month, in hard mode.
+Hard means requests are refused once the budget is gone.
+
+Now I send six requests.
+
+[pause 2]
+
+The first two get a 200.
+From the third request on, the answer is 429.
+
+The error code is budget exceeded.
+And the response says how many seconds remain until the next month.
+
+A soft budget would let requests through, and flag them instead.
+The count is checked before each call, so one request can slightly overshoot.
+
+## 9 bm_lewis
+Back in the dashboard, the overview shows requests per day.
+Spend for each app, against its budget.
+The busiest models, and errors by type.
+
+The red banner names the client that hit its hard budget.
+
+The audit page records who changed what, and when.
+Providers, aliases, clients, and keys.
+It records that a key was issued, never the key itself.
+
+And no prompts or answers are stored anywhere.
+Only counts, names, timings, and status.
+
+## 10 bf_emma
+Now the part that matters at fleet scale.
+Every app in the ecosystem is wired to two default aliases.
+Chat-default, and embed-default.
+
+Today they point at the demo provider.
+To move every app to a real model, add the provider.
+Then change the target of that alias.
+No app, no client, and no key changes.
+
+The Connect page gives each app its setup, ready to copy.
+
+With single sign-on, administrators can do everything.
+Operators manage clients and models.
+Viewers can only read usage.
+
+## 11 bf_emma
+To recap.
+One gateway holds your provider keys.
+Each app gets its own key, limits, and budget.
+
+A failing provider fails over to the next target.
+Usage is metered per app, without storing prompts.
+And one alias edit switches the whole fleet.
+
+To try it yourself, start the gateway locally with Docker.
+Sign in with the setup code, and use the built-in echo models.
+The full guide is in the docs folder of the project.
+
+Thanks for watching.

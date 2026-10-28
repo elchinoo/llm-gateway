@@ -5,14 +5,14 @@ from pathlib import Path
 from apgkit import migrate as kit_migrate
 from apgkit.auth.schema import SQL as AUTH_SQL
 
+from . import hardening
 from .core import db
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 
 
 def run() -> list[str]:
-    applied = kit_migrate.run(db, MIGRATIONS)
     with db.connect() as conn:
-        conn.execute(AUTH_SQL)
+        conn.execute(AUTH_SQL)               # before the hooks, so hardening also sees the kit tables (sessions, tokens)
         conn.commit()
-    return applied
+    return kit_migrate.run(db, MIGRATIONS, after_migrate=[hardening.apply])

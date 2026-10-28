@@ -1,5 +1,6 @@
 import { api } from "/kit/api.js";
 import { bootSession, can, refreshSession, renderLogin, renderSetup, renderVaultBanner, state } from "/kit/session.js";
+import { initInsights } from "/kit/insights.js";
 import { $, h } from "/kit/ui.js";
 import { initAudit } from "/static/audit.js";
 import { initClients } from "/static/clients.js";
@@ -9,9 +10,9 @@ import { initOverview } from "/static/overview.js";
 import { initProviders } from "/static/providers.js";
 import { initSettings } from "/static/settings.js";
 
-const TABS = ["overview", "clients", "models", "providers", "audit", "settings", "connect"];
-const INIT = { overview: initOverview, clients: initClients, models: initModels, providers: initProviders, audit: initAudit, settings: initSettings, connect: initConnect };
-const NEEDS = { overview: "usage:read", clients: "config:read", models: "config:read", providers: "config:read", audit: "audit:read", settings: "settings:manage", connect: "config:read" };
+const TABS = ["overview", "clients", "models", "providers", "audit", "settings", "database", "connect"];
+const INIT = { overview: initOverview, clients: initClients, models: initModels, providers: initProviders, audit: initAudit, settings: initSettings, database: () => initInsights($("view-database"), api), connect: initConnect };
+const NEEDS = { overview: "usage:read", clients: "config:read", models: "config:read", providers: "config:read", audit: "audit:read", settings: "settings:manage", database: "settings:manage", connect: "config:read" };
 const SECTIONS = ["auth-card", "vault-banner", "nav", "signout", ...TABS.map((t) => "view-" + t)];
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }

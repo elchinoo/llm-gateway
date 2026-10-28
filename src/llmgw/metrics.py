@@ -29,6 +29,7 @@ def _probe() -> dict[str, float]:
 
 
 metrics.add_db_collector(_probe)
+metrics.add_insights_collector(lambda: db.connect(retries=1))    # db_insights_* gauges (EDB query statistics, cached): the gateway's own database shows up in PagerLens
 
 
 def render() -> tuple[bytes, str]:

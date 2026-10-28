@@ -11,3 +11,8 @@ dist/
 api_key
 *.key
 *.pem
+
+# video recorder
+docs/video/out/
+docs/video/node_modules
+docs/video/package-lock.json

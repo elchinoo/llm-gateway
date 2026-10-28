@@ -36,7 +36,7 @@ export async function initConnect() {
     h("h2", { class: "section-title" }, "TrustDesk, PagerLens and PayBroker"),
     h("p", { class: "muted" }, "In the app: Settings, AI accounts, Add an account. The model fields take a model alias from the Models page, not a provider's model name."),
     code(ACCOUNT(url, chat, embed)),
-    h("p", { class: "muted" }, "The base URL must be https and reachable from the app's server. For a local http gateway the app needs its allow-private-URLs switch (TRUSTDESK_ALLOW_PRIVATE_LLM_URLS, PAGERLENS_ALLOW_PRIVATE_LLM_URLS, PAYBROKER_ALLOW_PRIVATE_URLS). TrustDesk's embedding dimension must match the alias (the built-in echo-embed returns 768)."),
+    h("p", { class: "muted" }, "The base URL must be https and reachable from the app's server. For a local http gateway the app needs its allow-private-URLs switch (TRUSTDESK_ALLOW_PRIVATE_LLM_URLS, PAGERLENS_ALLOW_PRIVATE_LLM_URLS, PAYBROKER_ALLOW_PRIVATE_URLS). TrustDesk's embedding dimension must match the alias: 768 for the built-in echo-embed (the echo default), 1536 for a real model such as text-embedding-3-small (the fleet manifest value)."),
     h("h2", { class: "section-title" }, "Try it with curl"),
     code(CURL(url, chat, embed)),
     h("p", { class: "muted" }, "Errors come back OpenAI-shaped: ", h("code", {}, '{"error": {"message", "type", "code"}}'), ". 401 bad or revoked key; 403 model not allowed for this client; 404 unknown model alias; 429 rate_limit_exceeded or budget_exceeded (with Retry-After); 502 every target failed; 503 provider keys locked or the database is waking."),

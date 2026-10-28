@@ -1,0 +1,7 @@
+{
+  "name": "llmgw-video-recorder",
+  "private": true,
+  "description": "Runs docs/VIDEO-SCRIPT.md against a local throwaway gateway. Needs the ecosystem/e2e checkout next to this repository (harness) and Google Chrome.",
+  "scripts": { "record": "playwright test -c playwright.config.ts" },
+  "devDependencies": { "@playwright/test": "1.64.1", "@types/node": "26.6.5" }
+}

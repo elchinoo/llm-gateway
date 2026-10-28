@@ -29,7 +29,7 @@ model to another by editing an alias). Built on [agentpg-kit](https://github.com
   Test button that makes one tiny call. A built-in `echo` provider needs no network and no key (a deterministic reply, plausible
   `usage`, and a hash-derived unit-vector embedding of configurable size, 768 by default), so demos and tests need no real
   provider. The first start seeds one `echo` provider, the demo aliases `echo-chat` and `echo-embed`, and the **default aliases
-  `chat-default` and `embed-default`** (both on echo, embeddings of 768 numbers) that the whole fleet is wired to (see below).
+  `chat-default` and `embed-default`** (both on echo, embeddings of 768 numbers unless `LLMGW_DEFAULT_EMBED_DIM` says otherwise) that the whole fleet is wired to (see below). 768 is only the built-in echo default; the fleet manifest (`ecosystem.yaml`) sets 1536 for a real embedding model such as `text-embedding-3-small`. See *Embedding size* below.
 - **Dashboard** at `/`: Overview (usage per day, per client, spend against budget, top models, errors), Clients, Models,
   Providers, Audit (who changed what, never secrets), Settings, and Connect (copy-paste setup for each app, plus curl).
 - **Prometheus** at `/metrics`: the fleet's shared families plus `llmgw_requests_total{client,alias,status}`,
@@ -76,7 +76,7 @@ In each app open **Settings > AI accounts > Add an account** and fill in the sam
 | API key | the app's gateway key (`lg_...`) |
 | Chat model | an alias, for example `chat-default` (or `echo-chat` to try it) |
 | Embedding model | an alias, for example `embed-default` (TrustDesk only; `echo-embed` to try it) |
-| Embedding dimensions | must match what the alias returns (768 for `echo-embed`) |
+| Embedding dimensions | must match what the alias returns (768 for the built-in `echo-embed`; 1536 for `text-embedding-3-small`) |
 
 - **TrustDesk**: AI accounts take a chat model, an embedding model and an embedding dimension.
 - **PagerLens** and **PayBroker**: AI accounts take a chat model.
@@ -89,7 +89,7 @@ The Connect page shows the same snippets with your URL filled in.
 
 ## Default aliases: the one switch for every app
 
-`chat-default` (chat) and `embed-default` (embeddings, 768 dimensions, what TrustDesk and PagerLens expect) exist from the first start,
+`chat-default` (chat) and `embed-default` (embeddings; echo's 768 dimensions by default) exist from the first start,
 on the built-in echo provider, so an app wired to them works immediately. To move **every app** to a real model, add the provider
 and **repoint the alias** (Models > `chat-default` > change its target, or `PUT /api/models/chat-default`); no app, client or key
 changes. Seeding is idempotent and never destructive: a gateway that predates the defaults gets them added once at its next start,
@@ -138,6 +138,11 @@ to call a model uses a client key.
 | `LLMGW_MAX_CONCURRENT` | Requests served at once (default 64); each in-flight call holds one worker thread. |
 | `LLMGW_POOL_MAX` | Size of the database connection pool used by the data plane (default 20). |
 | `LLMGW_OIDC_ISSUER`, `LLMGW_OIDC_CLIENT_ID`, `LLMGW_OIDC_CLIENT_SECRET[_FILE]`, `LLMGW_LOCAL_LOGIN` | Single sign-on. Off unless the issuer is set. `LLMGW_LOCAL_LOGIN=false` removes the admin-password login. |
+
+**Embedding size.** 768 is the built-in echo default (`LLMGW_DEFAULT_EMBED_DIM`, or the Settings default). When the fleet runs on a real
+embedding model, the size is that model's (1536 for `text-embedding-3-small`, which is what the fleet manifest `ecosystem.yaml` sets as
+`llm.embed_dimensions`; `ecoctl` writes it both to the apps' `EMBEDDING_DIM` and to the gateway's `LLMGW_DEFAULT_EMBED_DIM`). The size must be the
+same in the app and behind the `embed-default` alias, so when you repoint the alias to a real model, set the apps' dimension to that model's size.
 
 Defaults you can change in the UI (Settings): requests per minute for a new client (60), embedding size for a new alias (768),
 how long to keep usage rows (forever by default; at least 32 days when set).
@@ -216,3 +221,8 @@ make test-db                                  # the whole gateway against Postgr
 ```
 
 See [SECURITY.md](SECURITY.md) for the security model and its limits, and [API.md](API.md) for every endpoint.
+
+## Documentation
+
+- [docs/GUIDE.md](docs/GUIDE.md): the complete guide (ecosystem integration, architecture, install, configuration reference, operations, troubleshooting), including the **Database** insights tab ([7.9](docs/GUIDE.md#79-database-insights-dashboard-database)), what a read-only user or AgentPG's restricted MCP can see ([7.10](docs/GUIDE.md#710-what-a-read-only-database-user-and-agentpgs-restricted-mcp-can-see)) and [EDB and AgentPG capabilities used](docs/GUIDE.md#13b-edb-and-agentpg-capabilities-used-by-this-app).
+- [docs/VIDEO-SCRIPT.md](docs/VIDEO-SCRIPT.md): script for a 6-minute tutorial video, with recording notes.
