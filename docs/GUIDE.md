@@ -508,6 +508,8 @@ Limits: only the table owner can REVOKE (checked, with a logged warning if it di
 later migration is readable until it is listed in `MASKED_VIEWS` or `DENIED_TABLES` (a test fails when a column named like a hash, secret, token or ciphertext is readable). The app's own owner connection,
 `a1p_readwrite` members and the hosted MCP endpoint reached with `agentpg token` (a read-write session, see `ecosystem/docs/06`) are not restricted.
 
+Masking durability: grants made after startup reopen tables (`agentpg db-users create` and AgentPG's default privileges can give `a1p_readonly` SELECT on a base table again at any time). The app therefore re-asserts the masking every 5 minutes (`masking.reassert_forever`, started in the lifespan, running `hardening.apply` on its own connection), the Prometheus gauge `masking_drift_tables` counts the protected tables that were readable before the last re-assert (alert on `> 0`), `masking_last_ok_timestamp` shows the last success, and `/readyz` reports `masking` (`last_ok`, `drift`, `ok`; report only, it never makes readiness fail). A grant made just after a tick stays open until the next one (at most 5 minutes). Denied for drift counting: `provider` (base table; its masked view stays readable) plus the denied tables above.
+
 ## 8. Roles and permissions
 
 Standalone, the first-run admin holds everything (`*`). With single sign-on, roles come from the identity provider's `roles` claim, and only roles of this app count.
@@ -559,7 +561,7 @@ The full model is in [SECURITY.md](../SECURITY.md). The points an operator shoul
 | Endpoint | Auth | Meaning |
 |---|---|---|
 | `GET /healthz` | none | Liveness: `{"status": "ok", "version": ...}`. Does not touch the database. Used by the image `HEALTHCHECK` |
-| `GET /readyz` | none | `{"status": "ready"}` after `SELECT 1`; `503 {"status": "waking-database"}` otherwise (no connection details) |
+| `GET /readyz` | none | `{"status": "ready", "masking": {...}}` after `SELECT 1`; `503 {"status": "waking-database", "masking": {...}}` otherwise (no connection details) |
 | `GET /api/session` | none | State for the UI: `setup_required`, `logged_in` or `logged_out`, vault status, whether password and key login are offered, SSO info |
 | `GET /metrics` | `metrics:scrape` | Prometheus, including `db_up` evaluated at scrape time and the `db_insights_*` gauges ([7.9](#79-database-insights-dashboard-database)) |
 

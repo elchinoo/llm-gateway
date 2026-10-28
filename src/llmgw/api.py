@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import sys
 import threading
@@ -5,6 +6,7 @@ from pathlib import Path
 
 import anyio.to_thread
 import psycopg
+from apgkit import masking
 from apgkit.auth import Principal, TokenError
 from apgkit.auth.rp import safe_return_to
 from apgkit.guard import SecurityGuard
@@ -17,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import __version__, aliases, audit, clients, core, gateway, usage
+from . import __version__, aliases, audit, clients, core, gateway, hardening, usage
 from . import metrics as m
 from . import settings as cfg
 from .config import get_settings
@@ -76,9 +78,14 @@ async def lifespan(_: FastAPI):
     t = threading.Thread(target=_housekeeping, args=(_stop,), daemon=True, name="llmgw-housekeeping")
     t.start()
     _threads.append(t)
+    # grants after startup (agentpg db-users create, default privileges) reopen the base tables: re-assert the masking every 5 minutes
+    reassert = asyncio.create_task(masking.reassert_forever(
+        core.db.connect, hardening.apply, hardening.REASSERT_EVERY, deny=hardening.REASSERT_DENY, metrics=core.metrics))
     try:
         yield
     finally:
+        reassert.cancel()
+        await asyncio.gather(reassert, return_exceptions=True)
         _stop.set()
         for th in _threads:
             th.join(timeout=3)
@@ -143,9 +150,9 @@ def readyz():
     try:
         with connect(retries=1) as conn:
             conn.execute("SELECT 1")
-        return {"status": "ready"}
+        return {"status": "ready", "masking": masking.status()}      # report only: drift never fails readiness
     except Exception:  # noqa: BLE001 - never echo connection details
-        return JSONResponse({"status": "waking-database"}, status_code=503)
+        return JSONResponse({"status": "waking-database", "masking": masking.status()}, status_code=503)
 
 
 @app.get("/metrics", dependencies=[Depends(require("metrics:scrape"))])

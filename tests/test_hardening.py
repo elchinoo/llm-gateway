@@ -57,6 +57,32 @@ def test_read_only_login_sees_masked_providers_and_no_secret_tables(client, op, 
 
 
 @needs_db
+def test_grant_after_startup_is_closed_again_by_one_reassert_tick(client, op, ro):
+    """`agentpg db-users create` / default privileges re-grant SELECT on base tables after the startup hook ran."""
+    from apgkit import masking
+
+    from llmgw import core, hardening
+    from llmgw.db import connect
+    with connect() as c:
+        for t in hardening.REASSERT_DENY:
+            c.execute(f'GRANT SELECT ON public."{t}" TO a1p_readonly')
+        c.commit()
+        assert masking.drift(c, hardening.REASSERT_DENY) == list(hardening.REASSERT_DENY)
+    assert ro.execute("SELECT api_key_enc FROM provider").fetchall() is not None          # the hole: readable until the tick
+    assert masking.reassert_tick(core.db.connect, hardening.apply, deny=hardening.REASSERT_DENY, metrics=core.metrics) is True
+    for t in hardening.REASSERT_DENY:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            ro.execute(f'SELECT * FROM "{t}"')
+    assert ro.execute("SELECT * FROM provider_masked").fetchall()                         # the masked view still works
+    st = masking.status()
+    assert st["ok"] and st["drift"] == len(hardening.REASSERT_DENY) and st["last_ok"]
+    assert masking.reassert_tick(core.db.connect, hardening.apply, deny=hardening.REASSERT_DENY, metrics=core.metrics) is True
+    assert masking.status()["drift"] == 0
+    assert b"masking_drift_tables" in core.metrics.render()[0]
+    r = client.get("/readyz")                                                             # reported, never failing readiness
+    assert r.status_code == 200 and r.json()["masking"]["ok"] is True
+
+
 def test_every_secret_looking_column_is_covered(client, op, ro):
     """Guards new migrations: a hash/secret/ciphertext/key column must sit in a denied table or be left out of a masked view."""
     from llmgw import hardening

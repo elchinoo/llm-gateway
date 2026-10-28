@@ -82,6 +82,7 @@ is what it enforces, and where it stops.
 - Strict `Content-Security-Policy` (no inline script or style), `nosniff`, no framing, no referrer, no caching. All text reaches the
   page through `textContent`. CSV exports neutralise cells that start with `=`, `+`, `-` or `@`.
 - The container runs as a non-root user and holds no credentials; the database URL arrives at runtime.
+- **Masking durability**: the read-only database role's REVOKEs are re-asserted every 5 minutes (grants after startup would otherwise reopen the secret tables); gauge `masking_drift_tables` and `/readyz` `masking` show drift. A new grant can be readable for up to one interval.
 
 ## Known limits
 - **The request rate limit is per process and in memory**; with N replicas a client can reach N times its limit. So are the

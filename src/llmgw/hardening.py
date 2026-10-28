@@ -28,6 +28,11 @@ DENIED_TABLES = (
     "app_setting",            # kit settings and the vault store (wrapped data key, admin password hash)
     "web_session", "api_token", "oidc_login",     # session / operator token hashes, PKCE verifiers
 )
+# Base tables that must stay closed to the role at all times: the denied ones plus the masked table (its view is readable, the base is not).
+# The re-assert loop (api.lifespan) counts drift on these and re-runs `apply` every 5 minutes: grants made after startup
+# (`agentpg db-users create`, default privileges) reopen base tables otherwise.
+REASSERT_DENY = tuple(MASKED_VIEWS) + DENIED_TABLES
+REASSERT_EVERY = 300
 
 
 def apply(conn: psycopg.Connection, role: str = ROLE) -> dict[str, object]:
