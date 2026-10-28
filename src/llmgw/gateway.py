@@ -1,11 +1,13 @@
 """The data plane: validate an OpenAI-style request, enforce the client's limits, call the alias's targets in order, meter it.
 
-Only an allow-list of fields is forwarded (no tools, no `user`, no provider-specific passthrough), the request is never
-streamed, and neither prompts nor completions are stored anywhere: a usage row holds counts, names, latency and status.
+Only an allow-list of fields is forwarded (function tools and their tool_choice/parallel_tool_calls, but no `user` and no
+provider-specific passthrough), the request is never streamed, and neither prompts, tool schemas, tool arguments nor completions
+are stored anywhere: a usage row holds counts, names, latency and status.
 """
 import json
 import logging
 import math
+import re
 import threading
 import time
 from collections import deque
@@ -17,9 +19,15 @@ from .usage import Event
 
 MAX_BODY = 512 * 1024
 MAX_MESSAGES, MAX_INPUTS = 500, 256
-ROLES = {"system", "user", "assistant", "developer"}
+ROLES = {"system", "user", "assistant", "developer", "tool"}
 CHAT_FIELDS = {"model", "messages", "max_tokens", "temperature", "top_p", "stop", "response_format", "seed", "presence_penalty",
-               "frequency_penalty", "n"}
+               "frequency_penalty", "n", "tools", "tool_choice", "parallel_tool_calls"}
+# Tool calling (function tools only). Bounds keep one request from carrying an unbounded schema or argument payload.
+MAX_TOOLS, MAX_TOOL_BYTES, MAX_TOOLS_BYTES = 64, 16 * 1024, 128 * 1024
+MAX_TOOL_DEPTH, MAX_TOOL_DESCRIPTION = 8, 4096
+MAX_CALLS_PER_MESSAGE, MAX_CALL_ARGS, MAX_CALL_ID = 64, 64 * 1024, 128
+TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+CHOICES = {"none", "auto", "required"}
 EMBED_FIELDS = {"model", "input", "dimensions", "encoding_format"}
 REASONING_FIELDS = ("reasoning", "reasoning_content")
 EMPTY_NOTE = "empty-content-reasoning-only"
@@ -53,7 +61,129 @@ def _text(content, where: str) -> str:
     if isinstance(content, list) and content and all(isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
                                                     and set(p) <= {"type", "text"} for p in content):
         return "".join(p["text"] for p in content)
-    raise GatewayError(400, "invalid_messages", f"{where}: content must be a string (or a list of text parts); images, audio and tool calls are not supported")
+    raise GatewayError(400, "invalid_messages", f"{where}: content must be a string (or a list of text parts); images and audio are not supported")
+
+
+def _bad(code: str, message: str) -> GatewayError:
+    return GatewayError(400, code, message)
+
+
+def _depth(value, limit: int, level: int = 1) -> bool:
+    """True when the JSON value nests at most `limit` levels (it stops descending at the limit, so it cannot overflow)."""
+    if level > limit:
+        return False
+    kids = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
+    return all(_depth(k, limit, level + 1) for k in kids)
+
+
+def _tools(tools) -> tuple[int, set[str]]:
+    """Check `tools`: a list of function tools, bounded in count and size. Returns (characters, names)."""
+    if not isinstance(tools, list) or not 1 <= len(tools) <= MAX_TOOLS:
+        raise _bad("invalid_tools", f"'tools' must be a list of 1 to {MAX_TOOLS} function tools")
+    names: set[str] = set()
+    total = 0
+    for i, tool in enumerate(tools):
+        where = f"tools[{i}]"
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(tool, dict) or set(tool) != {"type", "function"} or tool["type"] != "function" or not isinstance(fn, dict):
+            raise _bad("invalid_tools", f"{where} must be {{type: 'function', function: {{name, description?, parameters?}}}}; only function tools are supported")
+        if set(fn) - {"name", "description", "parameters", "strict"} or not isinstance(fn.get("name"), str) or not TOOL_NAME.match(fn["name"]):
+            raise _bad("invalid_tools", f"{where}.function needs a name of 1 to 64 letters, digits, '_' or '-', and only name, description, parameters, strict")
+        if fn["name"] in names:
+            raise _bad("invalid_tools", f"{where}: duplicate tool name {fn['name']!r}")
+        names.add(fn["name"])
+        desc = fn.get("description")
+        if desc is not None and not (isinstance(desc, str) and len(desc) <= MAX_TOOL_DESCRIPTION):
+            raise _bad("invalid_tools", f"{where}.function.description must be a string of at most {MAX_TOOL_DESCRIPTION} characters")
+        if "strict" in fn and fn["strict"] is not None and not isinstance(fn["strict"], bool):
+            raise _bad("invalid_tools", f"{where}.function.strict must be a boolean")
+        params = fn.get("parameters")
+        if params is not None and not (isinstance(params, dict) and params.get("type", "object") == "object" and _depth(params, MAX_TOOL_DEPTH)):
+            raise _bad("invalid_tools", f"{where}.function.parameters must be a JSON-schema object (type 'object') nested at most {MAX_TOOL_DEPTH} levels")
+        size = len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
+        if size > MAX_TOOL_BYTES:
+            raise _bad("invalid_tools", f"{where} is larger than {MAX_TOOL_BYTES // 1024} KB")
+        total += size
+    if total > MAX_TOOLS_BYTES:
+        raise _bad("invalid_tools", f"'tools' are larger than {MAX_TOOLS_BYTES // 1024} KB in total")
+    return total, names
+
+
+def _tool_choice(body: dict, names: set[str] | None) -> None:
+    choice = body.get("tool_choice")
+    if choice is None and body.get("parallel_tool_calls") is None:
+        return
+    if choice is not None:
+        named = choice.get("function") if isinstance(choice, dict) else None
+        ok = choice in CHOICES if isinstance(choice, str) else (isinstance(choice, dict) and set(choice) == {"type", "function"}
+                                                               and choice["type"] == "function" and isinstance(named, dict)
+                                                               and set(named) == {"name"} and isinstance(named["name"], str))
+        if not ok:
+            raise _bad("invalid_tool_choice", "'tool_choice' must be none, auto, required or {type: 'function', function: {name}}")
+        if choice != "none" and not names:
+            raise _bad("invalid_tool_choice", "'tool_choice' needs 'tools' (only 'none' may be sent without them)")
+        if isinstance(choice, dict) and named["name"] not in names:
+            raise _bad("invalid_tool_choice", f"'tool_choice' names {named['name'][:40]!r}, which is not in 'tools'")
+    if body.get("parallel_tool_calls") is not None:
+        if not isinstance(body["parallel_tool_calls"], bool):
+            raise _bad("invalid_parallel_tool_calls", "'parallel_tool_calls' must be a boolean")
+        if not names:
+            raise _bad("invalid_parallel_tool_calls", "'parallel_tool_calls' needs 'tools'")
+
+
+def _tool_calls(calls, where: str) -> tuple[int, list[str]]:
+    """Check an assistant message's `tool_calls`. Returns (characters of names + arguments, call ids)."""
+    if not isinstance(calls, list) or not 1 <= len(calls) <= MAX_CALLS_PER_MESSAGE:
+        raise _bad("invalid_messages", f"{where}.tool_calls must be a list of 1 to {MAX_CALLS_PER_MESSAGE} tool calls")
+    chars, ids, clean = 0, [], []
+    for j, call in enumerate(calls):
+        at = f"{where}.tool_calls[{j}]"
+        fn = call.get("function") if isinstance(call, dict) else None
+        if not isinstance(call, dict) or not {"id", "type", "function"} <= set(call) or call["type"] != "function" or not isinstance(fn, dict):
+            raise _bad("invalid_messages", f"{at} must be {{id, type: 'function', function: {{name, arguments}}}}")
+        cid = call["id"]
+        if not isinstance(cid, str) or not 1 <= len(cid) <= MAX_CALL_ID or not cid.isprintable() or cid in ids:
+            raise _bad("invalid_messages", f"{at}.id must be a unique printable string of 1 to {MAX_CALL_ID} characters")
+        if not {"name", "arguments"} <= set(fn) or not isinstance(fn["name"], str) or not TOOL_NAME.match(fn["name"]) \
+                or not isinstance(fn["arguments"], str) or len(fn["arguments"]) > MAX_CALL_ARGS:
+            raise _bad("invalid_messages", f"{at}.function needs a tool name and `arguments` as a string of at most {MAX_CALL_ARGS // 1024} KB")
+        ids.append(cid)
+        chars += len(fn["name"]) + len(fn["arguments"])
+        clean.append({"id": cid, "type": "function", "function": {"name": fn["name"], "arguments": fn["arguments"]}})
+    calls[:] = clean        # providers add keys such as `index`; they are dropped, not forwarded
+    return chars, ids
+
+
+def _message(msg, i: int, pending: set[str]) -> int:
+    """Check one chat message and return its prompt characters. `pending` holds the tool-call ids still waiting for a result."""
+    where = f"messages[{i}]"
+    if not isinstance(msg, dict) or set(msg) - {"role", "content", "name", "tool_calls", "tool_call_id"} or msg.get("role") not in ROLES:
+        raise _bad("invalid_messages", f"{where} must be an object with a role ({', '.join(sorted(ROLES))}), content and optionally name "
+                                       "(assistant: tool_calls; tool: tool_call_id)")
+    role, chars = msg["role"], 0
+    if "name" in msg and (not isinstance(msg["name"], str) or len(msg["name"]) > 64):
+        raise _bad("invalid_messages", f"{where}.name must be a short string")
+    if "tool_calls" in msg and role != "assistant":
+        raise _bad("invalid_messages", f"{where}: only assistant messages carry tool_calls")
+    if "tool_call_id" in msg and role != "tool":
+        raise _bad("invalid_messages", f"{where}: only tool messages carry tool_call_id")
+    if role == "tool":
+        cid = msg.get("tool_call_id")
+        if not isinstance(msg.get("content"), str):
+            raise _bad("invalid_messages", f"{where}: a tool message needs string content (the tool's result)")
+        if not isinstance(cid, str) or cid not in pending:
+            raise _bad("invalid_messages", f"{where}.tool_call_id must answer a tool call of the assistant message before it, once")
+        pending.discard(cid)
+        return len(msg["content"])
+    if role == "assistant" and msg.get("tool_calls") not in (None, []):           # an empty list (some clients send it) means none
+        chars, ids = _tool_calls(msg["tool_calls"], where)
+        pending.clear()
+        pending.update(ids)
+        if msg.get("content") is not None:                       # null (or absent) content is fine next to tool calls
+            chars += len(_text(msg["content"], where))
+        return chars
+    pending.clear()
+    return len(_text(msg.get("content"), where))
 
 
 def validate(endpoint: str, body) -> tuple[dict, int]:
@@ -75,12 +205,14 @@ def validate(endpoint: str, body) -> tuple[dict, int]:
         msgs = body.get("messages")
         if not isinstance(msgs, list) or not 1 <= len(msgs) <= MAX_MESSAGES:
             raise GatewayError(400, "invalid_messages", f"'messages' must be a list of 1 to {MAX_MESSAGES} messages")
+        pending: set[str] = set()
         for i, msg in enumerate(msgs):
-            if not isinstance(msg, dict) or set(msg) - {"role", "content", "name"} or msg.get("role") not in ROLES:
-                raise GatewayError(400, "invalid_messages", f"messages[{i}] must be an object with a role ({', '.join(sorted(ROLES))}), content and optionally name")
-            chars += len(_text(msg.get("content"), f"messages[{i}]"))
-            if "name" in msg and (not isinstance(msg["name"], str) or len(msg["name"]) > 64):
-                raise GatewayError(400, "invalid_messages", f"messages[{i}].name must be a short string")
+            chars += _message(msg, i, pending)
+        names = None
+        if body.get("tools") is not None:
+            tool_chars, names = _tools(body["tools"])
+            chars += tool_chars                                  # the schemas are prompt too: they count for budgets and estimates
+        _tool_choice(body, names)
         _num(body, "max_tokens", 1, 131_072, True)
         _num(body, "temperature", 0, 2)
         _num(body, "top_p", 0, 1)
@@ -155,6 +287,8 @@ def _completion_chars(data: dict) -> int:
         msg = ch.get("message") if isinstance(ch, dict) else None
         if isinstance(msg, dict) and isinstance(msg.get("content"), str):
             n += len(msg["content"])
+        if isinstance(msg, dict):
+            n += providers.call_chars(msg.get("tool_calls"))
     return n
 
 
@@ -229,7 +363,7 @@ def _serve(client: dict, endpoint: str, path: str, kind: str, raw: bytes, ev: Ev
     rate_check(client["id"], client["rpm_limit"])
     try:
         body = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         raise GatewayError(400, "invalid_json", "the request body is not valid JSON") from None
     with core.db.pool().connection() as conn:
         ev.alias = known_alias(conn, body.get("model") if isinstance(body, dict) else None)
@@ -288,8 +422,8 @@ def reasoning_only(data: dict) -> bool:
     """True when the first choice has no answer text but carries reasoning: a thinking model that ran out of max_tokens."""
     choices = data.get("choices")
     msg = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
-    if not isinstance(msg, dict) or msg.get("content") not in (None, ""):
-        return False
+    if not isinstance(msg, dict) or msg.get("content") not in (None, "") or msg.get("tool_calls"):
+        return False                                         # a tool call is an answer: null content next to it is normal
     return any(msg.get(k) for k in REASONING_FIELDS)
 
 

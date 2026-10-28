@@ -1,5 +1,6 @@
 """No database needed: request validation, token maths, the echo provider, the rate window, CSV safety."""
 import base64
+import json
 import struct
 
 import pytest
@@ -15,7 +16,7 @@ def msgs(text="hi"):
 def test_validate_chat_allows_only_the_allow_list():
     fields, chars = gateway.validate("chat", {"model": "m", "messages": msgs("hello"), "temperature": 0.5, "stream": False, "seed": None})
     assert fields == {"messages": msgs("hello"), "temperature": 0.5} and chars == 5
-    for bad in ({"tools": []}, {"user": "x"}, {"stream_options": {}}, {"logprobs": True}):
+    for bad in ({"functions": []}, {"user": "x"}, {"stream_options": {}}, {"logprobs": True}):
         with pytest.raises(GatewayError) as e:
             gateway.validate("chat", {"model": "m", "messages": msgs(), **bad})
         assert e.value.status == 400 and e.value.code == "unknown_field"
@@ -35,6 +36,151 @@ def test_validate_chat_rejects_bad_values(body):
     with pytest.raises(GatewayError) as e:
         gateway.validate("chat", body)
     assert e.value.status == 400
+
+
+# ---- tool calling ----------------------------------------------------------------------------------------------------
+def tool(name="lookup", **fn):
+    return {"type": "function", "function": {"name": name, "description": "d", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}, **fn}}
+
+
+def call(cid="call_1", name="lookup", args='{"q": "x"}'):
+    return {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}
+
+
+def size(*tools):
+    return sum(len(json.dumps(t, separators=(",", ":"))) for t in tools)
+
+
+def chat(msgs_, **extra):
+    return gateway.validate("chat", {"model": "m", "messages": msgs_, **extra})
+
+
+def test_tools_are_forwarded_unchanged_and_counted_as_prompt():
+    tools = [tool(), tool("other", strict=True)]
+    fields, chars = chat(msgs("hi"), tools=tools, tool_choice="auto", parallel_tool_calls=False)
+    assert fields["tools"] == tools and fields["tool_choice"] == "auto" and fields["parallel_tool_calls"] is False
+    assert chars == 2 + size(*tools)
+    for ch in ("none", "required", {"type": "function", "function": {"name": "other"}}):
+        assert chat(msgs(), tools=tools, tool_choice=ch)[0]["tool_choice"] == ch
+    assert chat(msgs(), tool_choice="none")[0]["tool_choice"] == "none"             # allowed without tools
+    assert chat(msgs(), tools=[{"type": "function", "function": {"name": "bare"}}])                  # description and parameters are optional
+
+
+@pytest.mark.parametrize("extra", [
+    {"tools": []}, {"tools": "x"}, {"tools": [tool()] * 2}, {"tools": [{"type": "retrieval"}]}, {"tools": [{"type": "function"}]},
+    {"tools": [{"type": "function", "function": {"name": "bad name"}}]}, {"tools": [{"type": "function", "function": {"name": "x" * 65}}]},
+    {"tools": [{"type": "function", "function": {"name": "a"}, "extra": 1}]}, {"tools": [tool(extra=1)]},
+    {"tools": [tool(description="x" * 5000)]}, {"tools": [tool(parameters=[])]}, {"tools": [tool(parameters={"type": "string"})]},
+    {"tools": [tool(parameters={"type": "object", "properties": {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {}}}}}}}}}})]},
+    {"tools": [tool(parameters={"type": "object", "x": "y" * 20000})]}, {"tools": [tool(strict="yes")]},
+    {"tools": [tool(f"t{i}") for i in range(65)]},
+    {"tools": [tool()], "tool_choice": "sometimes"}, {"tools": [tool()], "tool_choice": 1}, {"tools": [tool()], "tool_choice": {"type": "function"}},
+    {"tools": [tool()], "tool_choice": {"type": "function", "function": {"name": "missing"}}},
+    {"tools": [tool()], "tool_choice": {"type": "function", "function": {"name": "lookup", "x": 1}}},
+    {"tool_choice": "auto"}, {"tool_choice": "required"}, {"tools": [tool()], "parallel_tool_calls": "no"}, {"parallel_tool_calls": True},
+])
+def test_bad_tools_are_refused(extra):
+    with pytest.raises(GatewayError) as e:
+        chat(msgs(), **extra)
+    assert e.value.status == 400 and e.value.code.startswith("invalid_") and "tool" in e.value.code
+
+
+def test_tool_total_size_is_bounded():
+    big = [tool(f"t{i}", description="d" * 4000, parameters={"type": "object", "x": "y" * 12000}) for i in range(10)]
+    with pytest.raises(GatewayError, match="in total"):
+        chat(msgs(), tools=big)
+
+
+def test_tool_call_round_trip_messages():
+    convo = [{"role": "user", "content": "q"}, {"role": "assistant", "content": None, "tool_calls": [call("a"), call("b", args="{}")]},
+             {"role": "tool", "tool_call_id": "b", "content": "rb"}, {"role": "tool", "tool_call_id": "a", "content": "ra"},
+             {"role": "assistant", "content": "done", "tool_calls": []}, {"role": "user", "content": "more"}]
+    fields, chars = chat(convo, tools=[tool()])
+    assert fields["messages"] == convo
+    assert chars == 1 + (len("lookup") * 2 + len('{"q": "x"}') + 2) + 2 + 2 + 4 + 4 + size(tool())
+    chat(convo[:3] + [{"role": "tool", "tool_call_id": "a", "content": ""}])                         # empty result is fine
+    chat([{"role": "assistant", "content": "text", "tool_calls": [call()]}, {"role": "tool", "tool_call_id": "call_1", "content": "r"}])
+
+
+@pytest.mark.parametrize("convo", [
+    [{"role": "assistant", "content": None}],                                                         # null content without calls
+    [{"role": "user", "content": "q", "tool_calls": [call()]}],                                       # calls on a non-assistant
+    [{"role": "tool", "tool_call_id": "call_1", "content": "r"}],                                      # result with no call
+    [{"role": "assistant", "content": None, "tool_calls": [call()]}, {"role": "tool", "content": "r"}],            # no id
+    [{"role": "assistant", "content": None, "tool_calls": [call()]}, {"role": "tool", "tool_call_id": "zzz", "content": "r"}],
+    [{"role": "assistant", "content": None, "tool_calls": [call()]}, {"role": "tool", "tool_call_id": "call_1", "content": "r"},
+     {"role": "tool", "tool_call_id": "call_1", "content": "r"}],                                      # answered twice
+    [{"role": "assistant", "content": None, "tool_calls": [call()]}, {"role": "tool", "tool_call_id": "call_1", "content": ["x"]}],
+    [{"role": "assistant", "content": None, "tool_calls": [call()]}, {"role": "tool", "tool_call_id": "call_1", "content": None}],
+    [{"role": "assistant", "content": None, "tool_calls": [call()]}, {"role": "user", "content": "x"}, {"role": "tool", "tool_call_id": "call_1", "content": "r"}],
+    [{"role": "user", "content": "q", "tool_call_id": "call_1"}],
+    [{"role": "assistant", "content": None, "tool_calls": [call(), call()]}],                         # duplicate ids
+    [{"role": "assistant", "content": None, "tool_calls": [call(cid="")]}],
+    [{"role": "assistant", "content": None, "tool_calls": [call(cid="x" * 129)]}],
+    [{"role": "assistant", "content": None, "tool_calls": [call(name="bad name")]}],
+    [{"role": "assistant", "content": None, "tool_calls": [call(args={"q": 1})]}],                    # arguments must be a string
+    [{"role": "assistant", "content": None, "tool_calls": [call(args="x" * 70000)]}],
+    [{"role": "assistant", "content": None, "tool_calls": [{**call(), "type": "custom"}]}],
+    [{"role": "assistant", "content": None, "tool_calls": [{"type": "function", "function": {"name": "n", "arguments": "{}"}}]}],      # no id
+    [{"role": "assistant", "content": None, "tool_calls": [{"id": "a", "function": {"name": "n", "arguments": "{}"}}]}],              # no type
+    [{"role": "assistant", "content": None, "tool_calls": [{"id": "a", "type": "function", "function": {"name": "n"}}]}],           # no arguments
+    [{"role": "assistant", "content": None, "tool_calls": call()}],
+    [{"role": "assistant", "content": None, "tool_calls": [call(f"c{i}") for i in range(65)]}],
+    [{"role": "assistant", "content": None, "tool_calls": [call()], "function_call": {}}],
+])
+def test_bad_tool_messages_are_refused(convo):
+    with pytest.raises(GatewayError) as e:
+        chat(convo)
+    assert e.value.status == 400 and e.value.code == "invalid_messages"
+
+
+def test_extra_keys_in_tool_calls_are_dropped_not_forwarded():
+    sent = [{"role": "user", "content": "q"}, {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "a", "type": "function", "index": 0, "extra_content": {"x": 1}, "function": {"name": "lookup", "arguments": "{}", "strict": True}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "r"}]
+    fields, chars = chat(sent)
+    assert fields["messages"][1]["tool_calls"] == [call("a", args="{}")]
+    assert chars == 1 + len("lookup") + 2 + 1
+
+
+def test_completion_counting_includes_tool_calls_and_a_tool_call_is_not_reasoning_only():
+    msg = {"role": "assistant", "content": None, "tool_calls": [call()], "reasoning": "thinking"}
+    data = {"choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls"}]}
+    assert gateway._completion_chars(data) == len("lookup") + len('{"q": "x"}')
+    assert gateway.reasoning_only(data) is False
+    assert gateway.reasoning_only({"choices": [{"message": {"content": None, "reasoning": "t"}}]}) is True
+
+
+def test_echo_with_tools_answers_in_text_and_never_calls_a_tool():
+    body = {"messages": msgs("call:lookup {}"), "tools": [tool()]}
+    out = providers.echo_call("chat", {**body, "messages": msgs("why is it slow?")}, "m", 8)
+    msg = out["choices"][0]["message"]
+    assert msg["content"] == "Echo from m: why is it slow?" and "tool_calls" not in msg and out["choices"][0]["finish_reason"] == "stop"
+    plain = providers.echo_call("chat", {"messages": msgs("why is it slow?")}, "m", 8)
+    assert out["usage"]["prompt_tokens"] > plain["usage"]["prompt_tokens"]                           # the schemas are counted
+    # a directive for a tool that was not offered, bad JSON, a non-object, tool_choice none: all plain text
+    for text, extra in (("call:other {}", {}), ("call:lookup {oops", {}), ("call:lookup [1]", {}), ("call:lookup {}", {"tool_choice": "none"}),
+                        ("please call:lookup {}", {})):
+        r = providers.echo_call("chat", {"messages": msgs(text), "tools": [tool()], **extra}, "m", 8)
+        assert r["choices"][0]["finish_reason"] == "stop" and r["choices"][0]["message"]["content"] == f"Echo from m: {text}", text
+    assert providers.echo_call("chat", {"messages": msgs("call:lookup {}")}, "m", 8)["choices"][0]["finish_reason"] == "stop"   # no tools offered
+
+
+def test_echo_call_directive_makes_one_tool_call_then_text():
+    ask_ = [{"role": "system", "content": "s"}, {"role": "user", "content": 'call:lookup {"q": "abc", "n": 2}'}]
+    out = providers.echo_call("chat", {"messages": ask_, "tools": [tool()]}, "m", 8)
+    ch = out["choices"][0]
+    assert ch["finish_reason"] == "tool_calls" and ch["message"]["content"] is None
+    (tc,) = ch["message"]["tool_calls"]
+    assert tc["type"] == "function" and tc["function"]["name"] == "lookup" and json.loads(tc["function"]["arguments"]) == {"q": "abc", "n": 2}
+    assert out["usage"]["completion_tokens"] > 0 and out["usage"]["total_tokens"] == out["usage"]["prompt_tokens"] + out["usage"]["completion_tokens"]
+    assert out == providers.echo_call("chat", {"messages": ask_, "tools": [tool()]}, "m", 8)           # deterministic
+    gateway.validate("chat", {"model": "m", "messages": ask_ + [ch["message"], {"role": "tool", "tool_call_id": tc["id"], "content": "r"}], "tools": [tool()]})
+    after = providers.echo_call("chat", {"messages": ask_ + [ch["message"], {"role": "tool", "tool_call_id": tc["id"], "content": "r"}],
+                                         "tools": [tool()]}, "m", 8)
+    assert after["choices"][0]["finish_reason"] == "stop" and "tool_calls" not in after["choices"][0]["message"]   # no loop
+    bare = providers.echo_call("chat", {"messages": [{"role": "user", "content": "call:lookup"}], "tools": [tool()]}, "m", 8)
+    assert json.loads(bare["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]) == {}
 
 
 def test_validate_embeddings():

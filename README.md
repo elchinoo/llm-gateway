@@ -197,9 +197,13 @@ Other spellings work the same way, for example `{"thinking": {"type": "disabled"
 - **No streaming.** `stream: true` is a 400. The fleet's apps never stream, so the gateway reads the whole answer, caps it
   (8 MB), and meters it exactly. `stream: false` is accepted.
 - **A small, fixed field allow-list.** Only `model, messages, max_tokens, temperature, top_p, stop, response_format, seed,
-  presence_penalty, frequency_penalty, n` (1 only), and for embeddings `input, dimensions, encoding_format` are forwarded.
-  Anything else (tools, `user`, provider-specific fields) is a 400. Messages carry text only. Provider-specific fields are set by
+  presence_penalty, frequency_penalty, n` (1 only), the tool-calling fields `tools, tool_choice, parallel_tool_calls`, and for
+  embeddings `input, dimensions, encoding_format` are forwarded. Anything else (`user`, legacy `functions`, provider-specific fields)
+  is a 400. Messages carry text, plus assistant `tool_calls` and `role: tool` results. Provider-specific fields are set by
   the operator per alias target instead (see Thinking models).
+- **Tool calling is function tools only, never streamed.** Bounded: 64 tools, 16 KB each, 128 KB together; 64 calls per assistant
+  message. Tool schemas and arguments are forwarded unchanged and counted as prompt characters for budgets; nothing of them is
+  stored. See `API.md` for the exact shapes and the echo provider's test hook.
 - **The requests-per-minute limit is in memory and per process.** With several replicas a client can reach N times its limit;
   put a proxy limit in front if that matters. Failed-key attempts are limited the same way (30 per minute per address).
 - **Token counts are the provider's own `usage` when it sends one.** Otherwise they are **estimates** (characters divided by 4,

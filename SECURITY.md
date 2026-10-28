@@ -40,13 +40,21 @@ is what it enforces, and where it stops.
 - **No prompts, completions, embedding inputs or embedding outputs, anywhere.** A usage row holds the client, key id, alias,
   provider, upstream model, token counts, estimated cost, latency, status, error class and attempt count. Unknown model names from a
   caller are not stored or used as metric labels. A test sends a marker string in prompts (accepted, rejected, failing and echo
-  requests) and scans every table for it.
+  requests) and scans every table for it; another does the same for tool arguments and tool results.
 - Prompts and answers do pass through the gateway's memory, and to the provider you chose: the gateway is as trustworthy as the
   host it runs on and the providers behind it.
 
 **The data plane's shape**
-- Only an allow-list of fields is forwarded; unknown fields (tools, `user`, provider-specific passthrough) are refused with 400,
-  `stream: true` is refused, `n` must be 1, messages carry text only, values are range checked. Bodies over 512 KB are refused with
+- Only an allow-list of fields is forwarded; unknown fields (`user`, legacy `functions`, provider-specific passthrough) are refused
+  with 400, `stream: true` is refused, `n` must be 1, messages carry text (plus assistant `tool_calls` and `role: tool` results,
+  nothing multimodal), values are range checked.
+- **Tool calling is bounded and never executed here.** Function tools only (other types are refused); at most 64 tools, 16 KB per
+  tool, 128 KB in total, names limited to `[A-Za-z0-9_-]{1,64}` and unique, schemas nested at most 8 levels, at most 64 tool calls of
+  at most 64 KB of arguments per message, every `tool_call_id` must answer a call of the message before it, `tool_choice` may only name
+  a listed tool. The gateway never runs a tool and never parses or evaluates arguments; it forwards them as opaque strings, and the
+  caller's application decides what to execute (treat model-chosen arguments as untrusted input there). Tool schemas, calls,
+  arguments and results are prompt content: they are counted for budgets but never stored, logged or used as metric labels (a test
+  scans every table for marker strings in tool arguments and results). Bodies over 512 KB are refused with
   413 (also when chunked, without reading past the limit). Responses over 8 MB are refused.
 - **`extra_body` is operator-controlled.** The only way a provider-specific field reaches an upstream is the operator-set
   `extra_body` of an alias target (permission `models:manage`); a client cannot send one and its fields never override it. It cannot
@@ -80,7 +88,7 @@ is what it enforces, and where it stops.
   failed-credential limits.
 - **Budgets are checked before the call**, so requests in flight can overshoot; token counts without a provider `usage` block are
   estimates (characters / 4); prices are entered by an admin. Cost is an estimate, not an invoice.
-- No streaming, and no tools or multimodal input, by design.
+- No streaming and no multimodal input, by design. Tool calling is supported for function tools only (see above).
 - Behind a reverse proxy every caller may share one address, which makes the per-address failed-credential limits coarse
   (valid data-plane keys are unaffected, operator sign-in attempts are not): set proxy-level limits too.
 - One audit trail row per change; it records that a key was issued or revoked, not its value.

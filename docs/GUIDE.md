@@ -46,7 +46,7 @@ It is for:
 - **App developers** who want to call chat or embedding models with an OpenAI client and not hold provider keys.
 - **Demo and test authors**: the built-in `echo` provider needs no network and no key, so the whole fleet runs end to end without a real model.
 
-It is deliberately small. It does not stream, does not forward tool calls or images, and does not store prompts or completions
+It is deliberately small. It does not stream and does not forward images, and it forwards only function tool calls (API.md), and does not store prompts or completions
 (see [Known limitations](#16-known-limitations-and-unverified-points)).
 
 ## 2. How it fits the ecosystem
@@ -392,7 +392,9 @@ arrow, **Add a fallback target**), an **Enabled** switch, and per target **Extra
 
 **Providers.** **Add a provider** (preset, base URL, API key, enabled). Each row shows the key's last four characters only, how many aliases use it,
 and buttons to edit, **Test**, delete. A provider cannot be deleted while an alias targets it. Editing lets you replace the key or tick "Remove the stored key".
-The echo provider has no URL and no key.
+The echo provider has no URL and no key. With tools in the request it answers in plain text and never calls a tool, so apps that always
+send `tools` (PagerLens's chat, for one) work on echo. To test a tool round trip, make the last user message `call:<tool> {json}`: echo
+then returns that tool call (`finish_reason: "tool_calls"`) once, and plain text after the tool result. Details in API.md.
 
 **Audit.** Who changed what and when, with details (never keys or passwords); **Load more** pages backwards.
 
@@ -608,7 +610,9 @@ for short queries (`LLMGW_POOL_MAX`).
 | `403 model_not_allowed` | The client's allowed aliases lack this alias | Edit the client; with `ecoctl`, `ecoctl llm sync <app> --apply` adds missing default aliases |
 | `403 client_disabled` | The client is switched off | Clients > the client > Enabled |
 | `404 model_not_found` | Alias unknown or disabled; an app is sending a provider model name, not an alias | `GET /v1/models`; use an alias |
-| `400 unknown_field` | The app sends `tools`, `user`, `stream_options` or another unsupported field | Remove it; the gateway cannot forward it |
+| `400 unknown_field` | The app sends `user`, `stream_options`, `functions` or another unsupported field | Remove it; the gateway cannot forward it |
+| `400 invalid_tools` / `invalid_tool_choice` / `invalid_parallel_tool_calls` | A tool is not a function tool, a name is not `[A-Za-z0-9_-]{1,64}`, a schema is too big or deep, `tool_choice` names an unlisted tool, or it is sent without `tools` | Fix the request; limits are in API.md |
+| `400 invalid_messages` on a tool message | A `role: tool` message has no `tool_call_id`, answers a call twice, or the assistant message before it has no matching `tool_calls` | Send the assistant message with its `tool_calls` and one result per call id, in order |
 | `400 stream_not_supported` | The app asked for streaming | Disable streaming in the app |
 | `429 rate_limit_exceeded` | The client's rpm window is full | Wait for `Retry-After`, or raise the client's limit |
 | `429 budget_exceeded` | Hard monthly budget used up (UTC month) | Raise or remove the budget, switch to soft, or wait for next month |
@@ -638,7 +642,9 @@ make test-db       # whole gateway against Postgres; needs POSTGRES_PASSWORD exp
 `make test-db` drops and recreates a database named `llmgw_test` in the compose Postgres and sets `TEST_DATABASE_URL` for that run. Database tests are
 skipped when `TEST_DATABASE_URL` is unset (`conftest.py`). The test fixtures wipe all tables between tests, then re-seed echo, lock the vault and clear the static key.
 
-Test files: `tests/test_pure.py` (validation, accounting, echo, rate window, CSV, `extra_body`, reasoning detection), `tests/test_db.py` (the gateway against Postgres, including the
+`tests/test_pagerlens_ask_e2e.py` runs the gateway in process on a loopback port with the echo provider and drives PagerLens's Ask through it (a real tool round trip). It needs PagerLens's interpreter and a second database; it skips itself otherwise (the command is in the file's docstring).
+
+Test files: `tests/test_pure.py` (validation including tools and tool messages, accounting, echo and its tool hook, rate window, CSV, `extra_body`, reasoning detection), `tests/test_db.py` (the gateway against Postgres, including the
 secret-leak and marker-in-prompt scans), `tests/test_hardening.py` (kit version, insights route and degradation, metrics, a real read-only login role: masked `provider_masked`, secret tables denied), `tests/test_federation_db.py` (roles, service scopes, SSO login, vault from platform secret), `tests/test_ui.py` with `tests/js/*.test.mjs` (fake-DOM tests of the dashboard under node, and a check
 that the static JS uses no native dialogs). CI runs the tests against a `pgvector/pgvector:pg17` service before building the image.
 
@@ -655,8 +661,8 @@ and `503` with `Retry-After`) and uses `PG*` variables when no DSN is given. Eve
 - The gateway **stays** in the architecture. AIDB registers remote models as OpenAI-compatible endpoints, so `aidb.create_model(...)` can point at `https://<gateway>/v1` with a dedicated gateway client (for example one named `aidb`).
   Provider keys, budgets, failover and per-consumer usage then stay in one place, and the alias choice per consumer stays in the gateway.
 - `ecoctl` is planned to register the models against the gateway as part of an `aidb: true` manifest key.
-- Open points named in that document: whether tool calling through the gateway works for the chosen provider type (the gateway currently refuses `tools`), and that providers using native Responses or Anthropic APIs bypass the gateway's OpenAI surface.
-  The document says to test this early. Both are limitations of the gateway as it stands (section 16).
+- Open points named in that document: whether tool calling works for the chosen provider type (the gateway now forwards OpenAI function tools; whether the model supports them is the provider's business), and that providers using native Responses or Anthropic APIs bypass the gateway's OpenAI surface.
+  The document says to test this early. The second is a limitation of the gateway as it stands (section 16).
 - No gateway-to-AIDB path has been exercised or tested; this is a plan, not a feature.
 
 ## 13b. EDB and AgentPG capabilities used by this app
@@ -697,7 +703,7 @@ Created by `001_init.sql` and `002_extra_body_reasoning.sql` (the kit adds its o
 
 Limitations of the gateway (by design, stated in the code and SECURITY.md):
 
-- No streaming (`stream: true` is 400), no tools or function calling, no images or audio, `n` must be 1, no pass-through of provider-specific client fields.
+- No streaming (`stream: true` is 400), function tools only (no other tool types, no legacy `functions`), no images or audio, `n` must be 1, no pass-through of provider-specific client fields.
 - The request rate limit and the failed-credential limits are in memory and per process.
 - Budgets are checked before the call; token counts without a provider `usage` block are estimates; prices are entered by hand; cost is not an invoice.
 - Behind a reverse proxy all callers may share one address, which makes the per-address failure limits coarse.

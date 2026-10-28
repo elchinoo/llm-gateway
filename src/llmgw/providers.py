@@ -1,12 +1,14 @@
 """Upstream provider accounts and the one function that calls them.
 
 Kinds: `openai` (any OpenAI-compatible endpoint; the key is encrypted by the vault, the URL is checked by the NetGuard when it
-is saved and again on every call) and `echo` (built in: no network, no key, a deterministic reply, for demos and tests).
+is saved and again on every call) and `echo` (built in: no network, no key, a deterministic reply, for demos and tests; a request with tools gets a
+plain text reply, and only a last user message `call:<tool> {json}` makes it answer with that tool call, to test a tool round-trip).
 """
 import base64
 import hashlib
 import json
 import math
+import re
 import struct
 from dataclasses import dataclass
 
@@ -131,6 +133,49 @@ def _text_of(content) -> str:
     return ""
 
 
+def call_chars(calls) -> int:
+    """Characters of a message's tool calls (function names plus argument strings), for token estimates. Tolerant of bad shapes."""
+    n = 0
+    for c in calls if isinstance(calls, list) else []:
+        fn = c.get("function") if isinstance(c, dict) else None
+        if isinstance(fn, dict):
+            n += sum(len(v) for k, v in fn.items() if k in ("name", "arguments") and isinstance(v, str))
+    return n
+
+
+# Testing aid: a tool round-trip without a model. Only the echo provider reads this prefix.
+ECHO_CALL = re.compile(r"call:([A-Za-z0-9_-]{1,64})(?:[ \t]+(.*))?\Z", re.S)
+
+
+def _echo_tool_call(messages: list, body: dict) -> dict | None:
+    """`call:<tool> {json}` as the last user message, when that tool is offered, tool_choice is not "none" and no tool call has
+    happened since: the reply is that tool call. Anything else (no match, unknown tool, arguments not a JSON object) is a plain reply,
+    so a request that merely carries tools never calls one. After the tool's result the loop ends in text, not in another call."""
+    tools = body.get("tools") or []
+    if not tools or body.get("tool_choice") == "none":
+        return None
+    idx = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
+    if idx is None or any(m.get("role") == "tool" or m.get("tool_calls") for m in messages[idx + 1:]):
+        return None
+    found = ECHO_CALL.match(_text_of(messages[idx].get("content")).strip())
+    if not found or found[1] not in {(t.get("function") or {}).get("name") for t in tools if isinstance(t, dict)}:
+        return None
+    try:
+        args = json.loads(found[2] or "{}")
+    except ValueError:
+        return None
+    if not isinstance(args, dict):
+        return None
+    key = hashlib.sha256(json.dumps([found[1], args, len(messages)], sort_keys=True).encode()).hexdigest()[:12]
+    return {"id": f"call_echo_{key}", "type": "function", "function": {"name": found[1], "arguments": json.dumps(args, sort_keys=True)}}
+
+
+def _echo_prompt_tokens(body: dict) -> int:
+    """Message text, tool calls and tool schemas all count, as they do in the gateway's own estimate."""
+    n = sum(_estimate_tokens(len(_text_of(m.get("content"))) + call_chars(m.get("tool_calls"))) + 3 for m in body["messages"])
+    return n + _estimate_tokens(len(json.dumps(body["tools"], separators=(",", ":")))) if body.get("tools") else n
+
+
 def echo_call(endpoint: str, body: dict, model: str, dim: int) -> dict:
     """A deterministic fake provider: no network, no key. Chat repeats the last user message; embeddings are a unit vector
     derived from a hash of the input, so the same text always maps to the same vector."""
@@ -149,12 +194,20 @@ def echo_call(endpoint: str, body: dict, model: str, dim: int) -> dict:
         return {"object": "list", "data": data, "model": model, "usage": {"prompt_tokens": tokens, "total_tokens": tokens}}
     messages = body["messages"]
     last = next((_text_of(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), "")
+    chosen = _echo_tool_call(messages, body)
+    if chosen:
+        prompt = _echo_prompt_tokens(body)
+        completion = _estimate_tokens(call_chars([chosen]))
+        return {"id": "chatcmpl-echo-" + hashlib.sha256(json.dumps(messages).encode()).hexdigest()[:16], "object": "chat.completion",
+                "created": 0, "model": model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": None, "tool_calls": [chosen]}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}}
     reply = f"Echo from {model}: {last}".strip()
     cap = body.get("max_tokens")
     finish = "stop"
     if cap and len(reply) > cap * 4:
         reply, finish = reply[: cap * 4], "length"
-    prompt = sum(_estimate_tokens(len(_text_of(m.get("content")))) + 3 for m in messages)
+    prompt = _echo_prompt_tokens(body)
     completion = _estimate_tokens(len(reply))
     return {"id": "chatcmpl-echo-" + hashlib.sha256(json.dumps(messages).encode()).hexdigest()[:16], "object": "chat.completion",
             "created": 0, "model": model,
@@ -219,5 +272,5 @@ def test(provider: dict, model: str) -> dict:
     return {"ok": False, "latency_ms": ms, "http_status": res.status, "message": f"{res.fail}: {res.message}"[:300]}
 
 
-__all__ = ["ProviderError", "Upstream", "call", "create", "delete", "echo_call", "get_provider", "list_providers",
+__all__ = ["ProviderError", "Upstream", "call", "create", "delete", "call_chars", "echo_call", "get_provider", "list_providers",
            "test", "update"]

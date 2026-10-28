@@ -20,9 +20,38 @@ Bodies are JSON, at most **512 KB** (`413 request_too_large`). Requests are **ne
 
 ### `POST /v1/chat/completions`
 Allowed fields: `model`, `messages`, `max_tokens`, `temperature`, `top_p`, `stop`, `response_format`, `seed`,
-`presence_penalty`, `frequency_penalty`, `n` (only 1). `stream: true` is `400 stream_not_supported` (`false` is accepted).
-Each message is `{role: system|user|assistant|developer, content: string | [{type: "text", text}], name?}`. Returns the
-provider's chat completion with `model` set to the alias and the provider's `usage`.
+`presence_penalty`, `frequency_penalty`, `n` (only 1), and the tool-calling fields `tools`, `tool_choice`, `parallel_tool_calls`.
+`stream: true` is `400 stream_not_supported` (`false` is accepted).
+Each message is `{role: system|user|assistant|developer, content: string | [{type: "text", text}], name?}`, plus the two tool shapes
+below. Returns the provider's chat completion with `model` set to the alias and the provider's `usage`.
+
+**Tool calling** (OpenAI function calling, no streaming). Everything below is forwarded to the provider unchanged and the provider's
+answer comes back unchanged, so `choices[0].message.tool_calls` and `finish_reason: "tool_calls"` arrive as the provider sent them.
+- `tools`: 1 to 64 entries, each exactly `{type: "function", function: {name, description?, parameters?, strict?}}`. `name` is 1 to 64
+  letters, digits, `_` or `-` and unique; `description` at most 4096 characters; `parameters` a JSON-schema object (`type` `object`)
+  nested at most 8 levels; one tool at most 16 KB and all tools at most 128 KB serialized. An empty list is refused. Other tool
+  types (retrieval, custom, ...) and the legacy `functions` / `function_call` fields are refused.
+- `tool_choice`: `"none"`, `"auto"`, `"required"` or `{type: "function", function: {name}}` naming a tool that is in `tools`. Anything
+  except `"none"` needs `tools`.
+- `parallel_tool_calls`: a boolean; needs `tools`.
+- An assistant message may carry `tool_calls: [{id, type: "function", function: {name, arguments}}]` (1 to 64; `arguments` is the
+  provider's JSON text, a string of at most 64 KB; `id` a unique printable string of at most 128 characters) and then `content` may be
+  `null` or absent. Keys other than `id`, `type`, `function` (e.g. `index`) in a tool call, and other than `name`, `arguments` inside `function`, are dropped, not forwarded (id, type, function, name and arguments are required). `tool_calls: []` is treated as none. Only assistant messages carry `tool_calls`.
+- A `role: "tool"` message is `{role: "tool", tool_call_id, content: string}`, and its `tool_call_id` must answer a tool call of the
+  assistant message before it, once. Anything else on these shapes is `400 invalid_messages`; bad `tools`, `tool_choice` or
+  `parallel_tool_calls` are `400 invalid_tools`, `invalid_tool_choice`, `invalid_parallel_tool_calls`.
+- Metering: when the provider sends no `usage`, the estimate counts the message text, the tool-call names and arguments and the
+  serialized tool schemas as prompt characters, and the returned tool-call names and arguments as completion characters. The limits
+  (512 KB body, rate, budget, allowed aliases) apply as for any chat request.
+- A `message.content` of `null` next to `tool_calls` is a normal answer, never the `x-llmgw-note` reasoning-only case.
+- Whether the model supports tools is the provider's business: a provider that does not will answer 400, passed on as
+  `400 upstream_rejected`.
+- **Echo provider.** A request with `tools` is answered in plain text (`Echo from <model>: <last user message>`), never with a tool call,
+  so demos do not crash. For testing a tool round trip only: if the last user message is `call:<tool> {json}` (the arguments are
+  optional, default `{}`), that tool is offered, `tool_choice` is not `"none"` and no tool call has happened since that message, the
+  reply is one tool call with `finish_reason: "tool_calls"`, `content: null`, `id` `call_echo_<12 hex>` and the arguments as compact
+  JSON. After the tool result it answers in text, so the loop ends. A tool that was not offered, arguments that are not a JSON object,
+  or any other text give the plain reply; `required` and a named `tool_choice` do not force a call.
 
 ### `POST /v1/embeddings`
 Allowed fields: `model`, `input` (a string, or a list of up to 256 strings), `dimensions`, `encoding_format` (`float` or `base64`).
@@ -37,7 +66,7 @@ Always `{"error": {"message", "type", "code"}}`:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `unknown_field`, `stream_not_supported`, `invalid_json`, `invalid_messages`, `invalid_<field>`, `wrong_model_kind`, `upstream_rejected` | the request is wrong (`upstream_rejected` passes a provider's 400, 413 or 422 on, redacted, without failing over) |
+| 400 | `unknown_field`, `stream_not_supported`, `invalid_json`, `invalid_messages`, `invalid_tools`, `invalid_tool_choice`, `invalid_parallel_tool_calls`, `invalid_<field>`, `wrong_model_kind`, `upstream_rejected` | the request is wrong (`upstream_rejected` passes a provider's 400, 413 or 422 on, redacted, without failing over) |
 | 401 | `missing_api_key`, `invalid_api_key` | no key, or a wrong or revoked one |
 | 403 | `wrong_credential`, `client_not_registered`, `client_disabled`, `model_not_allowed` | not a data-plane credential; the client may not do that |
 | 404 | `model_not_found` | no such alias (or it is disabled) |
@@ -62,7 +91,7 @@ thinking off for that alias.
 ### What is metered
 One usage row per chat or embeddings request (including refusals once the client is known). Tokens are the provider's `usage`; if it
 is missing or not sane they are estimated as characters / 4 and the row is marked `estimated`. A request that fails without
-returning tokens counts zero tokens and no cost. Prompts and answers are never stored. When the provider reports `usage.completion_tokens_details.reasoning_tokens` it is kept as
+returning tokens counts zero tokens and no cost. Prompts, tool schemas, tool arguments, tool results and answers are never stored. When the provider reports `usage.completion_tokens_details.reasoning_tokens` it is kept as
 `reasoning_tokens` (part of the completion tokens, null when not reported).
 
 ## Control plane (`/api`)

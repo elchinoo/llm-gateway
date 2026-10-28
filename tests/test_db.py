@@ -242,7 +242,7 @@ def test_provider_urls_are_checked_on_save_and_on_every_call(client, op, vault_r
 # ---- request shape ----------------------------------------------------------------------------------------------------
 def test_unknown_fields_and_streaming_are_refused(client, op):
     _, key = add_client(client, op)
-    for extra in ({"tools": []}, {"user": "u1"}, {"logit_bias": {}}, {"provider": "x"}, {"functions": []}):
+    for extra in ({"stream_options": {}}, {"user": "u1"}, {"logit_bias": {}}, {"provider": "x"}, {"functions": []}):
         r = ask(client, key, **extra)
         assert r.status_code == 400 and r.json()["error"]["code"] == "unknown_field", extra
         assert list(extra)[0] in r.json()["error"]["message"]
@@ -474,6 +474,106 @@ def test_tokens_and_requests_appear_in_metrics(client, op):
         assert needle in text, needle
     ask(client, key, model="not-a-model-" + "z" * 50)             # an unknown alias must not become a label value
     assert "not-a-model" not in client.get("/metrics", headers=op).text
+
+
+# ---- tool calling ------------------------------------------------------------------------------------------------------
+TOOL = {"type": "function", "function": {"name": "lookup", "description": "find", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}
+SECRET_ARG = "ARGUMENT-MARKER-91c2"
+
+
+def tool_reply(**message):
+    msg = {"role": "assistant", "content": None, "tool_calls": [{"id": "call_9", "type": "function",
+           "function": {"name": "lookup", "arguments": json.dumps({"q": SECRET_ARG})}}], **message}
+    return httpx.Response(200, json={"id": "x", "object": "chat.completion", "model": "up",
+                                     "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls"}]})
+
+
+def test_tool_calls_are_forwarded_unchanged_and_answered_faithfully(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    add_alias(client, op, "gpt", [(pid, "upstream-x")])
+    _, key = add_client(client, op)
+    upstream.hosts["llm1.example.test"] = tool_reply()
+    convo = [{"role": "system", "content": "s"}, {"role": "user", "content": "find it"}]
+    extra = {"tools": [TOOL], "tool_choice": {"type": "function", "function": {"name": "lookup"}}, "parallel_tool_calls": False}
+    r = client.post("/v1/chat/completions", headers=key, json={"model": "gpt", "messages": convo, "max_tokens": 50, **extra})
+    assert r.status_code == 200, r.text
+    sent = json.loads(upstream.calls[0].content)
+    assert sent["tools"] == [TOOL] and sent["tool_choice"] == extra["tool_choice"] and sent["parallel_tool_calls"] is False
+    assert sent["messages"] == convo and sent["model"] == "upstream-x"
+    ch = r.json()["choices"][0]
+    assert ch["finish_reason"] == "tool_calls" and ch["message"]["content"] is None and r.json()["model"] == "gpt"
+    (tc,) = ch["message"]["tool_calls"]
+    assert tc == {"id": "call_9", "type": "function", "function": {"name": "lookup", "arguments": json.dumps({"q": SECRET_ARG})}}
+    assert "x-llmgw-note" not in r.headers
+    # second turn: the assistant's tool_calls (null content) and the tool result go back verbatim
+    convo += [ch["message"], {"role": "tool", "tool_call_id": "call_9", "content": "RESULT-MARKER-77"}]
+    upstream.hosts["llm1.example.test"] = chat_ok("the answer", usage={"prompt_tokens": 30, "completion_tokens": 4})
+    r2 = client.post("/v1/chat/completions", headers=key, json={"model": "gpt", "messages": convo, "tools": [TOOL]})
+    assert r2.status_code == 200 and r2.json()["choices"][0]["message"]["content"] == "the answer"
+    assert json.loads(upstream.calls[1].content)["messages"] == convo
+    with connect() as conn:
+        rows = conn.execute("SELECT prompt_tokens, completion_tokens, estimated FROM usage_event ORDER BY id").fetchall()
+        text = all_table_text(conn)
+    assert rows[0]["estimated"] is True and rows[0]["completion_tokens"] == -(-(len("lookup") + len(json.dumps({"q": SECRET_ARG}))) // 4)
+    assert rows[0]["prompt_tokens"] >= -(-len(json.dumps([TOOL], separators=(",", ":"))) // 4)    # the schema is in the estimate
+    assert rows[1]["prompt_tokens"] == 30 and rows[1]["estimated"] is False
+    assert SECRET_ARG not in text and "RESULT-MARKER" not in text and "find it" not in text and "call_9" not in text
+    assert SECRET_ARG not in client.get("/api/usage/recent", headers=op).text
+
+
+def test_tool_requests_are_refused_by_the_same_rules_as_before(client, op):
+    _, key = add_client(client, op)
+    base = {"model": "echo-chat", "messages": [{"role": "user", "content": "x"}]}
+    def post(**extra):
+        return client.post("/v1/chat/completions", headers=key, json={**base, **extra})
+    r = post(tools=[TOOL], stream=True)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "stream_not_supported"
+    for extra, code in (({"tools": []}, "invalid_tools"), ({"tools": [{"type": "retrieval"}]}, "invalid_tools"),
+                        ({"tools": [TOOL], "tool_choice": "maybe"}, "invalid_tool_choice"),
+                        ({"tools": [TOOL], "parallel_tool_calls": 1}, "invalid_parallel_tool_calls"),
+                        ({"tools": [TOOL], "functions": []}, "unknown_field"), ({"tools": [TOOL], "user": "u"}, "unknown_field")):
+        r = post(**extra)
+        assert r.status_code == 400 and r.json()["error"]["code"] == code, (extra, r.text)
+    r = post(messages=[{"role": "tool", "tool_call_id": "c", "content": "x"}])
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_messages"
+    big = {"model": "echo-chat", "messages": base["messages"], "tools": [TOOL], "pad": "x" * (600 * 1024)}
+    assert client.post("/v1/chat/completions", headers=key, json=big).status_code == 413
+
+
+def test_tool_requests_keep_budget_and_rate_limits(client, op):
+    _, key = add_client(client, op, monthly_token_budget=1, budget_mode="hard")
+    body = {"model": "echo-chat", "messages": [{"role": "user", "content": "x"}], "tools": [TOOL]}
+    assert client.post("/v1/chat/completions", headers=key, json=body).status_code == 200      # used up by the first call
+    r = client.post("/v1/chat/completions", headers=key, json=body)
+    assert r.status_code == 429 and r.json()["error"]["code"] == "budget_exceeded"
+    _, key2 = add_client(client, op, name="slow", rpm_limit=1)
+    assert client.post("/v1/chat/completions", headers=key2, json=body).status_code == 200
+    assert client.post("/v1/chat/completions", headers=key2, json=body).status_code == 429
+
+
+def test_echo_with_tools_is_plain_text_and_the_call_directive_round_trips(client, op):
+    _, key = add_client(client, op)
+    r = ask(client, key, "what is slow?", tools=[TOOL])
+    assert r.status_code == 200 and r.json()["choices"][0]["finish_reason"] == "stop"
+    assert r.json()["choices"][0]["message"]["content"] == "Echo from echo-1: what is slow?" and "tool_calls" not in r.json()["choices"][0]["message"]
+    r = ask(client, key, 'call:lookup {"q": "a"}', tools=[TOOL])
+    ch = r.json()["choices"][0]
+    assert ch["finish_reason"] == "tool_calls" and ch["message"]["content"] is None
+    tc = ch["message"]["tool_calls"][0]
+    assert tc["function"]["name"] == "lookup" and json.loads(tc["function"]["arguments"]) == {"q": "a"}
+    msgs_ = [{"role": "user", "content": 'call:lookup {"q": "a"}'}, ch["message"], {"role": "tool", "tool_call_id": tc["id"], "content": "42"}]
+    r2 = client.post("/v1/chat/completions", headers=key, json={"model": "echo-chat", "messages": msgs_, "tools": [TOOL]})
+    assert r2.status_code == 200 and r2.json()["choices"][0]["finish_reason"] == "stop"
+    assert r2.json()["usage"]["prompt_tokens"] > r.json()["usage"]["prompt_tokens"] - 1
+
+
+def test_a_thinking_model_that_calls_a_tool_is_not_flagged_as_empty(client, op, vault_ready, upstream):
+    pid = add_provider(client, op)
+    add_alias(client, op, "gpt", [(pid, "m")])
+    _, key = add_client(client, op)
+    upstream.hosts["llm1.example.test"] = tool_reply(reasoning="hmm")
+    r = ask(client, key, model="gpt", tools=[TOOL])
+    assert r.status_code == 200 and "x-llmgw-note" not in r.headers
 
 
 # ---- no content is ever stored -----------------------------------------------------------------------------------------------
