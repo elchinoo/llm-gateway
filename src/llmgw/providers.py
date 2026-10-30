@@ -60,6 +60,11 @@ def get_provider(conn, provider_id: int) -> dict:
     return row
 
 
+def key_context(provider_id: int) -> str:
+    """The vault context of a provider's stored key (see core.PROVIDER_KEY_CONTEXT)."""
+    return core.PROVIDER_KEY_CONTEXT.format(id=provider_id)
+
+
 def _need_vault(conn) -> None:
     if not core.vault.is_initialized(conn):
         raise ProviderError("set an admin password first (Settings), or start with LLMGW_ENCRYPTION_KEY: provider keys are stored encrypted")
@@ -83,14 +88,16 @@ def _check(kind: str, base_url: str | None) -> str | None:
 def create(conn, *, name: str, kind: str, base_url: str | None, api_key: str | None, enabled: bool = True) -> int:
     name = name.strip()
     url = _check(kind, base_url)
-    enc = last4 = bound = None
-    if _clean(api_key) and kind == "openai":
+    secret = api_key.strip() if _clean(api_key) and kind == "openai" else None
+    if secret:
         _need_vault(conn)
-        enc, last4, bound = core.vault.encrypt(api_key.strip()), api_key.strip()[-4:], origin_of(url)
     if conn.execute("SELECT 1 FROM provider WHERE lower(name)=lower(%s)", (name,)).fetchone():
         raise ProviderError("a provider with that name already exists")
+    last4, bound = (secret[-4:], origin_of(url)) if secret else (None, None)
     row = conn.execute("INSERT INTO provider (name, kind, base_url, api_key_enc, api_key_last4, key_origin, enabled) "
-                       "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id", (name, kind, url, enc, last4, bound, enabled)).fetchone()
+                       "VALUES (%s,%s,%s,NULL,%s,%s,%s) RETURNING id", (name, kind, url, last4, bound, enabled)).fetchone()
+    if secret:      # the ciphertext is bound to the row id, which exists only now; same transaction, so no row is ever visible without it
+        conn.execute("UPDATE provider SET api_key_enc=%s WHERE id=%s", (core.vault.encrypt(secret, key_context(row["id"])), row["id"]))
     conn.commit()
     return row["id"]
 
@@ -109,7 +116,7 @@ def update(conn, provider_id: int, *, name: str, base_url: str | None, api_key: 
     if new_key:
         _need_vault(conn)
         sets += ["api_key_enc=%s", "api_key_last4=%s", "key_origin=%s"]
-        args += [core.vault.encrypt(api_key.strip()), api_key.strip()[-4:], origin_of(url)]
+        args += [core.vault.encrypt(api_key.strip(), key_context(provider_id)), api_key.strip()[-4:], origin_of(url)]
     elif clear_key:
         sets += ["api_key_enc=NULL", "api_key_last4=NULL", "key_origin=NULL"]
     conn.execute(f"UPDATE provider SET {', '.join(sets)} WHERE id=%s", (*args, provider_id))
@@ -257,7 +264,7 @@ def call(provider: dict, endpoint: str, body: dict, upstream_model: str, embeddi
             return Upstream(502, fail="key_origin_mismatch", message="the provider's URL no longer matches the one its key was saved with; "
                             "re-enter the provider key to use it with the current URL")
         try:
-            key = core.vault.decrypt(provider["api_key_enc"])
+            key = core.vault.decrypt(provider["api_key_enc"], key_context(provider["id"]))   # legacy (pre-context) tokens open too
         except VaultLocked:
             return Upstream(503, fail="locked", message="the provider's key is locked; an administrator must unlock the vault")
         except VaultError:

@@ -125,5 +125,6 @@ don't need it. Bodies are JSON and unknown fields are rejected (422); bodies ove
 | `GET/PUT /api/settings` | `settings:manage` | `default_rpm`, `default_embedding_dim`, `usage_retention_days` |
 | `GET/POST/DELETE /api/tokens` | `settings:manage` | operator tokens (`lgt_`), shown once |
 | `POST /api/admin-password`, `POST /api/vault/unlock` | `settings:manage` | |
+| `POST /api/vault/rotate` `{password, confirm: true}` | `settings:manage` | replaces the vault data key and re-encrypts provider keys; needs the admin password when one exists (403 otherwise) and `confirm` (422); restart other replicas afterwards |
 | `GET /metrics` | `metrics:scrape` | Prometheus |
 | `GET /healthz`, `GET /readyz` | none | liveness; readiness (503 while the database wakes) |

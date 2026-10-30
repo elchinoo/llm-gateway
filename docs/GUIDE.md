@@ -289,7 +289,9 @@ file: the value of `<NAME>_FILE` is a path whose first line is the value (kit `r
 | `DATABASE_URL` | none | Postgres connection string. If unset, `DB_EXTERNAL_DSN`, then `PSQL_CONNECTION_STRING` are tried. If all are empty, libpq falls back to `PGHOST`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (which linked AgentPG sandboxes provide) |
 | `LLMGW_PUBLIC_URL` | the request's own address | Base URL used for the SSO redirect and shown on the Connect page. Trailing slash removed. Set it behind a proxy or on a sandbox |
 | `LLMGW_ENCRYPTION_KEY` / `_FILE` (file default `/etc/llmgw/encryption_key`) | empty | Platform secret that lets the vault unlock itself at startup and after every restart. Needed for real providers on an SSO-only deployment (no admin password to wrap the key) |
-| `LLMGW_API_KEY` / `_FILE` (file default `/etc/llmgw/api_key`) | empty | Optional static full-access **operator** key. Used by `ecoctl`. Never accepted on `/v1`. Can sign in to a browser session through `POST /api/login {api_key}` |
+| `LLMGW_API_KEY` / `_FILE` (file default `/etc/llmgw/api_key`) | empty | Optional static full-access **operator** key, at least 32 characters (shorter is refused; `openssl rand -base64 36`). Used by `ecoctl`. Never accepted on `/v1`. Can sign in to a browser session through `POST /api/login {api_key}` |
+| `LLMGW_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Comma-separated proxy addresses or CIDRs from which uvicorn trusts `X-Forwarded-For`/`-Proto`. Never `*`. Set it to the proxy in front of the gateway |
+| `LLMGW_TRUSTED_HOPS` | `1` | Number of proxies in front: the client address (limiters, logs) is that entry of `X-Forwarded-For` counted from the right; `0` uses the socket peer |
 | `LLMGW_DEFAULT_CHAT_ALIAS` | `chat-default` | Name of the default chat alias seeded on echo. Read at seeding time only; an invalid alias name falls back to the default |
 | `LLMGW_DEFAULT_EMBED_ALIAS` | `embed-default` | Name of the default embedding alias. Same rules |
 | `LLMGW_DEFAULT_EMBED_DIM` | the Settings default (768) | Size of the echo embedding of the default embedding alias; must be an integer 1 to 8192, otherwise ignored |
@@ -546,7 +548,7 @@ The full model is in [SECURITY.md](../SECURITY.md). The points an operator shoul
 - Provider keys are encrypted with a random data key that is stored only wrapped under the admin password and, if set, `LLMGW_ENCRYPTION_KEY`.
   A database dump alone reveals none. Keys are never returned (only the last four characters), logged, put in metrics, usage or audit rows; provider error text goes through `redact`.
 - Provider URLs are checked when saved **and on every call**: `https` only (unless private URLs are allowed), no embedded credentials, no loopback, private, link-local or carrier-grade-NAT addresses, no redirects.
-  The host name is resolved once for the check and again by the HTTP client; use egress rules if that matters.
+  The name is resolved once and the call is pinned to that validated address (literal IP in the URL, original `Host` header and TLS server name).
 - Client keys are 256-bit random values with prefix `lg_`, shown once, stored as SHA-256. The lookup is not cached, so revocation, disabling and limit changes apply on the next request in every process.
 - No prompts, completions or embedding inputs or outputs are stored anywhere. They do pass through the gateway's memory and to the provider you chose.
 - Only an allow-list of fields is forwarded; provider-specific fields come from the operator's `extra_body`, never from a client.
@@ -578,6 +580,17 @@ Restoring into a new database and starting `llmgw start` is enough; migrations a
 
 - **App key**: Clients > the client > **Rotate** with a grace period long enough for the app to be redeployed; or `POST .../rotate`. With `ecoctl`: `ecoctl apply --execute --rotate` rotates every app's key (and identity secrets, old keys stop at once), then `ecoctl recreate <app>`.
 - **Provider key**: Providers > Edit > paste the new key > Save, then Test. The change is immediate; no app is touched.
+- **Data key of the vault** (after the database, the admin password or `LLMGW_ENCRYPTION_KEY` may have been exposed; changing those only
+  re-wraps the same key): as an administrator with the vault unlocked, `POST /api/vault/rotate {"password": "<admin password>", "confirm": true}`,
+  or on a host that reaches the database `llmgw rotate-vault --confirm` (asks for the admin password, or reads `LLMGW_ADMIN_PASSWORD`).
+  A new data key is generated, every stored provider key is re-encrypted under it (and legacy tokens upgraded) in one transaction, both
+  wraps are rewritten (the platform wrap only when `LLMGW_ENCRYPTION_KEY` is set; otherwise the vault is password-only) and an audit row
+  with counts is written. **Restart every other replica right away**: it holds the old key in memory and cannot decrypt until restarted.
+  Old backups still open with the old key, so also re-issue the provider keys at their source. Provider key origins are not affected.
+
+Upgrading from a kit older than 0.4.0: all gateway processes must run the new version together (old code cannot read v2 wraps or tokens).
+The scrypt wrap parameters and password hash are upgraded at the next sign-in. Single sign-on now sets a short-lived `apg_oidc_bind`
+cookie at `/auth/login` and requires it at `/auth/callback`: a callback in another browser is refused.
 - **Operator token**: Settings > Operator tokens > create the new one, then revoke the old.
 - **Admin password**: Settings > Admin password. Signs everyone out and re-wraps the data key.
 - **Vault platform secret** (`LLMGW_ENCRYPTION_KEY`): changing it without the vault being unlocked will leave the platform unlock failing; sign in with the admin password first. The procedure for replacing it was not exercised for this guide.
@@ -701,6 +714,7 @@ Created by `001_init.sql` and `002_extra_body_reasoning.sql` (the kit adds its o
 | `llmgw serve` | run the gateway (uvicorn, `HOST`, `PORT`); does not migrate |
 | `llmgw start` | container entrypoint: migrate, then serve; exit 1 if migration fails |
 | `llmgw reset-admin` | forget the admin password, clear the vault, delete stored provider keys |
+| `llmgw rotate-vault --confirm` | replace the vault data key and re-encrypt stored provider keys; restart other replicas afterwards (10.3) |
 
 ## 16. Known limitations and unverified points
 

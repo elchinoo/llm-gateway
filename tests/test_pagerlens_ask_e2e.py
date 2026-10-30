@@ -36,7 +36,7 @@ from llmgw import core as gw_core  # noqa: E402
 from llmgw import migrate as gw_migrate  # noqa: E402
 from tests.conftest import all_table_text  # noqa: E402
 
-OPERATOR_KEY = "operator-e2e-key-0123456789"
+OPERATOR_KEY = "operator-e2e-key-0123456789-abcdefgh"
 GATEWAY_DB, PAGERLENS_DB = os.environ["TEST_DATABASE_URL"], os.environ["TEST_PAGERLENS_DATABASE_URL"]
 
 

@@ -22,6 +22,14 @@ is what it enforces, and where it stops.
   header of that request to that origin, targets carry no credentials or headers of their own, and redirects are refused. What
   this does not do: anyone who can read the database and has the admin password or `LLMGW_ENCRYPTION_KEY` can still decrypt the
   keys, and the provider host you saved is trusted with the key (including whoever controls its DNS, within the SSRF rules).
+- Each stored key is a vault v2 token (AES-256-GCM) **bound to its provider row** (`provider.api_key_enc:<id>`): a ciphertext copied
+  to another row fails to decrypt. Keys stored by earlier versions still decrypt and are upgraded by the next rotation. The data key
+  can be replaced (`POST /api/vault/rotate` with the admin password and `confirm: true`, or `llmgw rotate-vault --confirm`): every
+  provider key is re-encrypted in one transaction, the origin binding is untouched, an audit row (counts only) is written, and
+  **every other replica must be restarted** because it still holds the old key. Changing the admin password or
+  `LLMGW_ENCRYPTION_KEY` only re-wraps the same data key; rotate after either may have been exposed.
+- Without `LLMGW_ENCRYPTION_KEY` the vault is password-only: nobody but a person with the admin password can unlock it, and after any
+  restart real providers answer 503 `vault_locked` until an administrator unlocks it.
 - The key is decrypted only to build one upstream request. It is never returned by any endpoint (only its last four characters),
   never written to the usage table, the audit trail, logs or metrics, and any provider text passed back to a caller, or shown in a
   test result, goes through the kit's `redact` and is truncated. A test scans every table, the metrics, the log and every response
@@ -29,8 +37,8 @@ is what it enforces, and where it stops.
 - Provider URLs are validated when saved and **again on every call** (the guard resolves the name each time, so DNS that starts
   pointing at a private address after the save is refused): `https` only (unless private URLs are explicitly allowed), no
   embedded credentials, no loopback, private, link-local (cloud metadata) or carrier-grade-NAT addresses, no redirects, bounded
-  responses (8 MB), bounded time (`LLMGW_UPSTREAM_TIMEOUT`). Limitation: the host name is resolved once for the check and again by
-  the HTTP client; use egress rules if that matters.
+  responses (8 MB), bounded time (`LLMGW_UPSTREAM_TIMEOUT`). The name is resolved once and the connection is pinned to the validated
+  address (the request goes to that IP with the original `Host` header and TLS server name), so there is no second lookup to rebind.
 
 **Two kinds of credential that never cross**
 - *Client keys* (`lg_...`) are random, shown once and stored as SHA-256 hashes. They carry only `llm:use`, are refused on every
@@ -98,6 +106,11 @@ is what it enforces, and where it stops.
 - **Budgets are checked before the call**, so requests in flight can overshoot; token counts without a provider `usage` block are
   estimates (characters / 4); prices are entered by an admin. Cost is an estimate, not an invoice.
 - No streaming and no multimodal input, by design. Tool calling is supported for function tools only (see above).
+- The client address used by the limiters is the `LLMGW_TRUSTED_HOPS`-th `X-Forwarded-For` entry from the right (default 1, one proxy;
+  0 = the socket peer). The launcher trusts forwarded headers only from `LLMGW_FORWARDED_ALLOW_IPS` (default `127.0.0.1`); set it to
+  your proxy's address or CIDR, and keep the app reachable only through that proxy.
+- A static `LLMGW_API_KEY` must be at least 32 characters (a shorter one is refused and an error is logged); generate one with
+  `openssl rand -base64 36`.
 - Behind a reverse proxy every caller may share one address, which makes the per-address failed-credential limits coarse
   (valid data-plane keys are unaffected, operator sign-in attempts are not): set proxy-level limits too.
 - One audit trail row per change; it records that a key was issued or revoked, not its value.

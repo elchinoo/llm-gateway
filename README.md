@@ -131,7 +131,9 @@ to call a model uses a client key.
 | `DATABASE_URL` | Postgres connection string (`DB_EXTERNAL_DSN` and the `PG*` variables also work). |
 | `LLMGW_PUBLIC_URL` | Base URL used by the SSO callback (default: the request's own address). |
 | `LLMGW_ENCRYPTION_KEY[_FILE]` | Platform secret that lets the vault unlock itself after a restart (real providers need it) and lets an SSO-only deployment hold provider keys. |
-| `LLMGW_API_KEY[_FILE]` | Optional static full-access operator key. Prefer operator tokens. It is never accepted on `/v1`. |
+| `LLMGW_API_KEY[_FILE]` | Optional static full-access operator key, at least 32 characters (a shorter one is refused). Prefer operator tokens. It is never accepted on `/v1`. |
+| `LLMGW_FORWARDED_ALLOW_IPS` | Proxy addresses or CIDRs (comma separated) uvicorn trusts for `X-Forwarded-*` (default `127.0.0.1`; never `*`). |
+| `LLMGW_TRUSTED_HOPS` | Proxies in front of the gateway, for the client address the limiters use (default 1; 0 = socket peer). |
 | `LLMGW_DEFAULT_CHAT_ALIAS`, `LLMGW_DEFAULT_EMBED_ALIAS`, `LLMGW_DEFAULT_EMBED_DIM` | Names of the default aliases seeded on echo (defaults `chat-default`, `embed-default`) and the size of the echo embedding (default: the Settings default, 768). Read at seeding time only. |
 | `LLMGW_ALLOW_PRIVATE_URLS` | Allow provider URLs on private networks (a local model server; local testing only). |
 | `LLMGW_UPSTREAM_TIMEOUT` | Seconds before a provider call times out (default 60, clamped to 1-120). |

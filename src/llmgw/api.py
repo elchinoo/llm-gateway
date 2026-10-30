@@ -6,9 +6,9 @@ from pathlib import Path
 
 import anyio.to_thread
 import psycopg
-from apgkit import masking
+from apgkit import config, masking
 from apgkit.auth import Principal, TokenError
-from apgkit.auth.rp import safe_return_to
+from apgkit.auth.rp import BINDING_COOKIE, clear_binding, safe_return_to
 from apgkit.guard import SecurityGuard
 from apgkit.ratelimit import FailureLimiter
 from apgkit.vault import VaultLocked
@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import __version__, aliases, audit, clients, core, gateway, hardening, usage
+from . import __version__, aliases, audit, clients, core, gateway, hardening, usage, vault_admin
 from . import metrics as m
 from . import settings as cfg
 from .config import get_settings
@@ -285,6 +285,12 @@ def _start_session(conn, request: Request, response: Response, **who) -> None:
                         secure=is_https(request), max_age=12 * 3600, path="/")
 
 
+def _static_key_usable() -> bool:
+    """A configured static key that the kit accepts (>= 32 characters); a shorter one is refused everywhere, here included."""
+    key = local.static_key()
+    return bool(key) and config.static_key_problem(key) is None
+
+
 def _guard_attempts(request: Request) -> str:
     client = _client(request)
     if core.auth.limiter.limited(client):
@@ -311,7 +317,7 @@ def session_state(request: Request):
     state = "setup_required" if setup else "logged_in" if principal and principal.kind != "client" else "logged_out"
     out = {"state": state, "vault": v, "has_admin_password": has_password, "version": __version__,
            "password_login": has_password and (fed.local_login or not fed.enabled),
-           "key_login": local.static_key_configured() and (fed.local_login or not fed.enabled),
+           "key_login": _static_key_usable() and (fed.local_login or not fed.enabled),
            "sso": {"issuer": fed.issuer, "login_url": "/auth/login"} if fed.enabled else None}
     if principal and state == "logged_in":
         out["user"] = {"name": principal.name, "email": principal.email, "source": principal.source, "roles": sorted(principal.roles),
@@ -325,12 +331,14 @@ def sso_login(request: Request, next: str | None = None):
         raise HTTPException(404, "single sign-on is not configured")
     try:
         with connect(retries=1) as conn:
-            url = fed.rp.begin(conn, public_url(request, core.public_url_env) + "/auth/callback", next)
+            login = fed.rp.start(conn, public_url(request, core.public_url_env) + "/auth/callback", next)
     except psycopg.Error as exc:
         raise _db_unavailable() from exc
     except Exception:  # noqa: BLE001 - the identity provider may be unreachable
         return RedirectResponse("/?sso_error=the identity provider is unavailable", status_code=303)
-    return RedirectResponse(url, status_code=303)
+    resp = RedirectResponse(login.url, status_code=303)
+    login.bind(resp, secure=is_https(request))      # the browser-binding cookie: only this browser can finish this login
+    return resp
 
 
 @app.get("/auth/callback")
@@ -341,16 +349,20 @@ def sso_callback(request: Request, code: str = "", state: str = "", error: str =
         return RedirectResponse("/?sso_error=the sign-in was cancelled or failed", status_code=303)
     try:
         with connect(retries=1) as conn:
-            claims, back, id_token = fed.rp.finish(conn, public_url(request, core.public_url_env) + "/auth/callback", code, state)
+            claims, back, id_token = fed.rp.finish(conn, public_url(request, core.public_url_env) + "/auth/callback", code, state,
+                                                   request.cookies.get(BINDING_COOKIE))
             roles = [r for r in claims.get("roles", []) if isinstance(r, str)]
             if not core.APP_AUTH.permissions_for(roles=roles):
                 return RedirectResponse("/?sso_error=your account has no role in the LLM gateway; ask an administrator", status_code=303)
             resp = RedirectResponse(safe_return_to(back), status_code=303)
+            clear_binding(resp, secure=is_https(request))
             _start_session(conn, request, resp, subject=str(claims["sub"]), name=str(claims.get("name") or ""),
                            email=str(claims.get("email") or ""), roles=roles, source="oidc", id_token_hint=id_token)
             return resp
     except TokenError as exc:
-        return RedirectResponse("/?sso_error=" + str(exc)[:120], status_code=303)
+        bad = RedirectResponse("/?sso_error=" + str(exc)[:120], status_code=303)
+        clear_binding(bad, secure=is_https(request))
+        return bad
 
 
 @app.post("/api/setup")
@@ -373,17 +385,23 @@ def setup(body: SetupBody, request: Request, response: Response):
 
 @app.post("/api/login")
 def login(body: LoginBody, request: Request, response: Response):
-    client = _guard_attempts(request)
+    client = _client(request)
     try:
         with connect(retries=1) as conn:
             ok = False
             if body.password is not None:
-                ok = local.login_password(conn, body.password)
-            elif body.api_key is not None and local.static_key_matches(body.api_key):
-                ok = True
-                core.vault.try_unlock_with_platform_secret(conn)
+                # counts the attempt before hashing (429 over the limit, 503 ScryptBusy when every scrypt slot is taken: both are
+                # HTTPExceptions and propagate), costs one scrypt, forgives a success
+                ok = local.login_password(conn, body.password, client=client, limiter=core.auth.limiter)
+            elif body.api_key is not None:
+                if core.auth.limiter.limited(client):
+                    raise HTTPException(429, "too many failed attempts; wait a minute")
+                if _static_key_usable() and local.static_key_matches(body.api_key):
+                    ok = True
+                    core.vault.try_unlock_with_platform_secret(conn)
+                else:
+                    core.auth.limiter.record(client)
             if not ok:
-                core.auth.limiter.record(client)
                 raise HTTPException(401, "invalid credentials")
             _start_session(conn, request, response)
     except (psycopg.Error, RuntimeError) as exc:
@@ -417,6 +435,27 @@ def unlock_vault(body: UnlockBody, request: Request, p: Principal = Depends(requ
             raise HTTPException(403, "wrong password")   # 403, not 401: the session itself is still valid
         conn.commit()
     return {"ok": True}
+
+
+class RotateBody(_Body):
+    password: str | None = Field(None, max_length=256)
+    confirm: bool = False
+
+
+@app.post("/api/vault/rotate")
+def rotate_vault(body: RotateBody, request: Request, p: Principal = Depends(require("settings:manage"))):
+    """Replace the vault's data key and re-encrypt every stored provider key under it. Needs the admin password (when one exists) and
+    `confirm: true`. Every other replica must be restarted afterwards: it still holds the old key."""
+    if not body.confirm:
+        raise HTTPException(422, "set confirm to true: this replaces the data key; other replicas must be restarted afterwards")
+    client = _guard_attempts(request)
+    with connect() as conn:
+        try:
+            counts = vault_admin.rotate(conn, body.password, p.actor)
+        except vault_admin.RotationError as exc:
+            core.auth.limiter.record(client)
+            raise HTTPException(403 if "password" in str(exc) else 409, str(exc)) from exc
+    return {"ok": True, "rotated": counts, "restart_other_replicas": True}
 
 
 @app.post("/api/admin-password")

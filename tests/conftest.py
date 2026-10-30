@@ -72,7 +72,7 @@ def _fresh(request, monkeypatch):
 
 # ---- helpers -------------------------------------------------------------------------------------------------------
 CSRF = {"X-LLMGW-CSRF": "1"}
-STATIC_KEY = "operator-test-key-0123456789"
+STATIC_KEY = "operator-test-key-0123456789-abcdefgh"
 
 
 @pytest.fixture
@@ -94,16 +94,22 @@ class Upstream:
         self.calls: list[httpx.Request] = []
         self.dns_private = False
 
+    @staticmethod
+    def host_of(request: httpx.Request) -> str:
+        """The provider's name. The kit pins the connection to the validated address, so the URL carries the IP and the name travels
+        in the Host header (and the TLS server name)."""
+        return request.headers["host"].split(":")[0]
+
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
-        fn = self.hosts[request.url.host]
+        fn = self.hosts[self.host_of(request)]
         out = fn(request) if callable(fn) else fn
         if isinstance(out, Exception):
             raise out
         return out
 
     def hosts_called(self) -> list[str]:
-        return [c.url.host for c in self.calls]
+        return [self.host_of(c) for c in self.calls]
 
 
 def chat_ok(content="hello from upstream", usage=None, **extra):

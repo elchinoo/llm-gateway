@@ -173,6 +173,37 @@ def test_single_sign_on_login_creates_a_role_bound_session(client):
     assert client.get("/api/clients").status_code == 401
 
 
+def _start_login(client):
+    r = client.get("/auth/login", follow_redirects=False)
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    client.provider.nonce = q["nonce"][0]
+    return r, q
+
+
+def test_the_login_is_bound_to_the_browser_that_started_it(client):
+    r, q = _start_login(client)
+    assert "apg_oidc_bind=" in r.headers["set-cookie"] and "HttpOnly" in r.headers["set-cookie"]
+    cookie = client.cookies.get("apg_oidc_bind")
+    assert cookie
+    # another browser (no cookie), or one holding some other value, is refused and gets no session; the state is burnt either way
+    client.cookies.clear()
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert cb.headers["location"].startswith("/?sso_error=") and "lg_session" not in cb.cookies
+    r, q = _start_login(client)
+    client.cookies.set("apg_oidc_bind", "x" * 43)
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert cb.headers["location"].startswith("/?sso_error=") and "lg_session" not in cb.cookies
+    burnt = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert burnt.headers["location"].startswith("/?sso_error=")
+    # the right browser finishes, and the binding cookie is cleared afterwards
+    client.cookies.clear()
+    r, q = _start_login(client)
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert cb.headers["location"] == "/" and "lg_session" in client.cookies
+    assert any("apg_oidc_bind" in c and "Max-Age=0" in c for c in cb.headers.get_list("set-cookie"))
+    assert client.cookies.get("apg_oidc_bind") is None
+
+
 def test_sso_refuses_people_without_a_role_here(client):
     client.provider.id_claims = {"sub": "usr_9", "name": "Nobody", "roles": ["otherapp:admin"]}
     r = client.get("/auth/login", follow_redirects=False)

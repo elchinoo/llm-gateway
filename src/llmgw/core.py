@@ -26,6 +26,15 @@ netguard = NetGuard("LLMGW_ALLOW_PRIVATE_URLS")
 llm = LLMClient(netguard, vault, http_factory=lambda: httpx.Client(timeout=get_settings().upstream_timeout, follow_redirects=False))
 metrics = metrics_mod.Metrics(APP, __version__)
 
+# Every vault-encrypted column, so `rotate_data_key` re-encrypts it. The context binds a ciphertext to its row: a value copied to
+# another provider (or column) no longer decrypts. `key_origin` is a separate column and rotation never touches it.
+# FOR UPDATE: a concurrent provider edit waits until the rotation commits instead of being overwritten with an old-key value.
+PROVIDER_KEY_CONTEXT = "provider.api_key_enc:{id}"
+vault.register_store("provider.api_key_enc",
+                     "SELECT id, api_key_enc AS value FROM provider WHERE api_key_enc IS NOT NULL ORDER BY id FOR UPDATE",
+                     "UPDATE provider SET api_key_enc = %(value)s WHERE id = %(id)s",
+                     context=PROVIDER_KEY_CONTEXT)
+
 ALL = frozenset({"*"})
 PERMISSIONS = {
     "usage:read": "see usage, spend and the overview",

@@ -212,7 +212,7 @@ def test_the_upstream_key_never_leaks(client, op, vault_ready, upstream, caplog)
     assert stored["api_key_enc"] and UPSTREAM_KEY not in stored["api_key_enc"] and stored["api_key_last4"] == UPSTREAM_KEY[-4:]
     for text in surfaces:
         assert UPSTREAM_KEY not in text
-    assert core.vault.decrypt(stored["api_key_enc"]) == UPSTREAM_KEY      # it is recoverable by the vault, which is the point
+    assert core.vault.decrypt(stored["api_key_enc"], f"provider.api_key_enc:{pid}") == UPSTREAM_KEY      # it is recoverable by the vault, which is the point
 
 
 def test_provider_keys_need_the_vault(client, op, upstream):
@@ -939,3 +939,44 @@ def test_old_put_shape_without_extra_body_still_works(client, op):
     pid = next(p["id"] for p in client.get("/api/providers", headers=op).json()["items"] if p["kind"] == "echo")
     r = client.put("/api/models/legacy", headers=op, json={"kind": "chat", "targets": [{"provider_id": pid, "upstream_model": "echo-1"}]})
     assert r.status_code == 200 and r.json()["targets"][0]["extra_body"] == {}
+
+
+# ---- adoption of the shared hardening ------------------------------------------------------------------------------------------------
+def test_a_static_key_shorter_than_32_characters_is_refused(client, monkeypatch):
+    monkeypatch.setenv("LLMGW_API_KEY", "short-but-real-key-0123456789")        # 28 characters
+    assert client.get("/api/clients", headers=bearer("short-but-real-key-0123456789")).status_code == 401
+    assert client.post("/api/login", headers=CSRF, json={"api_key": "short-but-real-key-0123456789"}).status_code == 401
+    assert client.get("/api/session").json()["key_login"] is False
+
+
+def test_a_busy_scrypt_pool_answers_503_with_retry_after(client, vault_ready, monkeypatch):
+    from apgkit.passwords import ScryptBusy
+
+    def busy(*a, **k):
+        raise ScryptBusy()
+
+    monkeypatch.setattr(core.local, "_check_password", busy)
+    r = client.post("/api/login", headers=CSRF, json={"password": "correct horse battery staple"})
+    assert r.status_code == 503 and r.headers["retry-after"] == "1"
+    assert core.auth.limiter.limited("testclient") is False            # the attempt that was never judged is not held against the client
+
+
+def test_password_logins_are_limited_before_hashing(client, vault_ready):
+    codes = [client.post("/api/login", headers=CSRF, json={"password": f"wrong password {i}"}).status_code for i in range(40)]
+    assert codes[0] == 401 and codes[-1] == 429
+    assert client.post("/api/login", headers=CSRF, json={"password": "correct horse battery staple"}).status_code == 429
+
+
+def test_the_launcher_trusts_forwarded_headers_only_from_the_configured_proxy(monkeypatch):
+    import uvicorn
+
+    from llmgw import cli
+
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: seen.update(k))
+    monkeypatch.delenv("LLMGW_FORWARDED_ALLOW_IPS", raising=False)
+    cli._serve()
+    assert seen["proxy_headers"] is True and seen["forwarded_allow_ips"] == "127.0.0.1"
+    monkeypatch.setenv("LLMGW_FORWARDED_ALLOW_IPS", "10.0.0.0/8")
+    cli._serve()
+    assert seen["forwarded_allow_ips"] == "10.0.0.0/8"
