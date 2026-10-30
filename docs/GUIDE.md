@@ -542,6 +542,7 @@ people's tokens, anything holding `*`) are refused on `/v1`; client keys are ref
 
 The full model is in [SECURITY.md](../SECURITY.md). The points an operator should remember:
 
+- Each provider key is bound to the origin (scheme, host, port, path prefix) of the URL it was saved with and is sent only there. Changing the URL needs the key entered again in the same request (`422` otherwise); at call time a mismatch is refused (`key_origin_mismatch`) and nothing is sent. The key still reaches that provider, by design; it does not reach any other host. It is not protected from someone who holds both the database and the admin password or `LLMGW_ENCRYPTION_KEY`.
 - Provider keys are encrypted with a random data key that is stored only wrapped under the admin password and, if set, `LLMGW_ENCRYPTION_KEY`.
   A database dump alone reveals none. Keys are never returned (only the last four characters), logged, put in metrics, usage or audit rows; provider error text goes through `redact`.
 - Provider URLs are checked when saved **and on every call**: `https` only (unless private URLs are allowed), no embedded credentials, no loopback, private, link-local or carrier-grade-NAT addresses, no redirects.

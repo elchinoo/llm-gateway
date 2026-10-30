@@ -25,7 +25,7 @@ model to another by editing an alias). Built on [agentpg-kit](https://github.com
 - **Metering.** One usage row per request: client, key, alias, the provider and upstream model that answered, prompt,
   completion and total tokens, estimated cost, latency, HTTP status, error class, failover attempts. **Prompts, completions and
   embedding inputs and outputs are never stored.**
-- **Providers** with the API key encrypted by the vault, a URL checked by the SSRF guard on save *and on every call*, and a
+- **Providers** with the API key encrypted by the vault and bound to the origin it was saved with (changing the URL needs the key again; the key is never sent to another host), a URL checked by the SSRF guard on save *and on every call*, and a
   Test button that makes one tiny call. A built-in `echo` provider needs no network and no key (a deterministic reply, plausible
   `usage`, and a hash-derived unit-vector embedding of configurable size, 768 by default), so demos and tests need no real
   provider. The first start seeds one `echo` provider, the demo aliases `echo-chat` and `echo-embed`, and the **default aliases

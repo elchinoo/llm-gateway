@@ -1,7 +1,7 @@
 """Upstream provider accounts and the one function that calls them.
 
 Kinds: `openai` (any OpenAI-compatible endpoint; the key is encrypted by the vault, the URL is checked by the NetGuard when it
-is saved and again on every call) and `echo` (built in: no network, no key, a deterministic reply, for demos and tests; a request with tools gets a
+is saved and again on every call; the key is bound to the origin it was saved with and is never sent anywhere else) and `echo` (built in: no network, no key, a deterministic reply, for demos and tests; a request with tools gets a
 plain text reply, and only a last user message `call:<tool> {json}` makes it answer with that tool call, to test a tool round-trip).
 """
 import base64
@@ -11,6 +11,7 @@ import math
 import re
 import struct
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from apgkit.llm import LLMError, redact
 from apgkit.vault import VaultError, VaultLocked
@@ -23,12 +24,29 @@ PRESETS = [
     {"id": "openrouter", "name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1"},
     {"id": "custom", "name": "Other OpenAI-compatible endpoint", "base_url": ""},
 ]
-_PUBLIC = ("id, name, kind, base_url, (api_key_enc IS NOT NULL) AS has_key, api_key_last4, enabled, created_at, updated_at, "
+_PUBLIC = ("id, name, kind, base_url, (api_key_enc IS NOT NULL) AS has_key, api_key_last4, key_origin, enabled, created_at, updated_at, "
            "(SELECT count(*) FROM alias_target t WHERE t.provider_id = provider.id) AS targets")
 
 
 class ProviderError(ValueError):
     pass
+
+
+def origin_of(url: str | None) -> str:
+    """Where a request to `url` goes, in a canonical form: scheme, host, port and path prefix (query and fragment ignored,
+    default ports and a trailing slash removed). A stored key is bound to this value; any difference is a different destination."""
+    try:
+        parts = urlsplit((url or "").strip())
+        host, port = (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return ""
+    scheme = parts.scheme.lower()
+    if not scheme or not host:
+        return ""
+    if port is not None and (scheme, port) in {("https", 443), ("http", 80)}:
+        port = None
+    host = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{host}{':' + str(port) if port else ''}{parts.path.rstrip('/')}"
 
 
 def list_providers(conn) -> list[dict]:
@@ -65,14 +83,14 @@ def _check(kind: str, base_url: str | None) -> str | None:
 def create(conn, *, name: str, kind: str, base_url: str | None, api_key: str | None, enabled: bool = True) -> int:
     name = name.strip()
     url = _check(kind, base_url)
-    enc = last4 = None
+    enc = last4 = bound = None
     if _clean(api_key) and kind == "openai":
         _need_vault(conn)
-        enc, last4 = core.vault.encrypt(api_key.strip()), api_key.strip()[-4:]
+        enc, last4, bound = core.vault.encrypt(api_key.strip()), api_key.strip()[-4:], origin_of(url)
     if conn.execute("SELECT 1 FROM provider WHERE lower(name)=lower(%s)", (name,)).fetchone():
         raise ProviderError("a provider with that name already exists")
-    row = conn.execute("INSERT INTO provider (name, kind, base_url, api_key_enc, api_key_last4, enabled) VALUES (%s,%s,%s,%s,%s,%s) "
-                       "RETURNING id", (name, kind, url, enc, last4, enabled)).fetchone()
+    row = conn.execute("INSERT INTO provider (name, kind, base_url, api_key_enc, api_key_last4, key_origin, enabled) "
+                       "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id", (name, kind, url, enc, last4, bound, enabled)).fetchone()
     conn.commit()
     return row["id"]
 
@@ -83,12 +101,17 @@ def update(conn, provider_id: int, *, name: str, base_url: str | None, api_key: 
     if conn.execute("SELECT 1 FROM provider WHERE lower(name)=lower(%s) AND id<>%s", (name, provider_id)).fetchone():
         raise ProviderError("a provider with that name already exists")
     sets, args = ["name=%s", "base_url=%s", "enabled=%s", "updated_at=now()"], [name, url, enabled]
-    if _clean(api_key) and cur["kind"] == "openai":
+    new_key = bool(_clean(api_key)) and cur["kind"] == "openai"
+    if cur["has_key"] and not new_key and not clear_key and origin_of(url) != origin_of(cur["base_url"]):
+        # A stored key is never carried to another destination: whoever changes where requests go must supply the key again.
+        raise ProviderError("the URL (scheme, host, port or path) changed, so the stored key cannot be reused: "
+                            "enter the provider key again in the same request, or clear the key")
+    if new_key:
         _need_vault(conn)
-        sets += ["api_key_enc=%s", "api_key_last4=%s"]
-        args += [core.vault.encrypt(api_key.strip()), api_key.strip()[-4:]]
+        sets += ["api_key_enc=%s", "api_key_last4=%s", "key_origin=%s"]
+        args += [core.vault.encrypt(api_key.strip()), api_key.strip()[-4:], origin_of(url)]
     elif clear_key:
-        sets += ["api_key_enc=NULL", "api_key_last4=NULL"]
+        sets += ["api_key_enc=NULL", "api_key_last4=NULL", "key_origin=NULL"]
     conn.execute(f"UPDATE provider SET {', '.join(sets)} WHERE id=%s", (*args, provider_id))
     conn.commit()
 
@@ -105,7 +128,7 @@ def delete(conn, provider_id: int) -> None:
 @dataclass
 class Upstream:
     """The outcome of one attempt. `fail` is empty on success; otherwise one of: locked, unreachable, rejected_url,
-    too_large, bad_response, http_429, http_5xx, http_4xx. `retryable` says whether the next target should be tried."""
+    too_large, bad_response, key_origin_mismatch, http_429, http_5xx, http_4xx. `retryable` says whether the next target should be tried."""
     status: int = 200
     data: dict | None = None
     fail: str = ""
@@ -118,7 +141,7 @@ class Upstream:
 
     @property
     def retryable(self) -> bool:
-        return self.fail in {"locked", "unreachable", "rejected_url", "too_large", "bad_response", "http_429", "http_5xx"}
+        return self.fail in {"locked", "unreachable", "rejected_url", "key_origin_mismatch", "too_large", "bad_response", "http_429", "http_5xx"}
 
 
 def _estimate_tokens(chars: int) -> int:
@@ -222,13 +245,17 @@ def _shape_ok(endpoint: str, data) -> bool:
 
 def call(provider: dict, endpoint: str, body: dict, upstream_model: str, embedding_dim: int, extra_body: dict | None = None) -> Upstream:
     """One attempt against one target. `endpoint` is `chat/completions` or `embeddings`; `body` holds only allow-listed fields.
-    `extra_body` is the operator's per-target fields: merged after the client's, so they win; the gateway-owned keys are
+    The stored key is decrypted only when the provider's current URL has the same origin the key was saved with; otherwise
+    nothing is sent. `extra_body` is the operator's per-target fields: merged after the client's, so they win; the gateway-owned keys are
     dropped here again even though they were refused when saved. The echo provider ignores it.
     Never raises for provider trouble: the outcome says what happened, with provider text passed through `redact`."""
     if provider["kind"] == "echo":
         return Upstream(data=echo_call("embeddings" if endpoint == "embeddings" else "chat", body, upstream_model, embedding_dim))
     key = ""
     if provider["api_key_enc"]:
+        if not provider.get("key_origin") or origin_of(provider["key_origin"]) != origin_of(provider["base_url"]):
+            return Upstream(502, fail="key_origin_mismatch", message="the provider's URL no longer matches the one its key was saved with; "
+                            "re-enter the provider key to use it with the current URL")
         try:
             key = core.vault.decrypt(provider["api_key_enc"])
         except VaultLocked:

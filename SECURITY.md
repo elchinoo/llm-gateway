@@ -14,6 +14,14 @@ is what it enforces, and where it stops.
 - Encrypted with a random data key that is stored only wrapped under a key derived from the admin password (and optionally a
   platform secret, `LLMGW_ENCRYPTION_KEY`). A database dump alone reveals none of them. After a restart the vault is locked until
   a sign-in or the platform secret unlocks it; real providers then answer 503 `vault_locked` and the echo provider keeps working.
+- **The key is bound to the origin it was saved with** (scheme, host, port and path prefix of the provider URL). It is decrypted
+  only to build one upstream request, and only when the provider's current URL has that same origin; otherwise nothing is sent
+  (`key_origin_mismatch`, the same 502 as any unreachable target, with no key in the message). Changing the URL through the API
+  needs the key entered again in the same request (or `clear_key`); the stored key is never reused for another destination. Rows
+  created before this rule were bound to their then-current URL by a migration. The key is sent only in the `Authorization`
+  header of that request to that origin, targets carry no credentials or headers of their own, and redirects are refused. What
+  this does not do: anyone who can read the database and has the admin password or `LLMGW_ENCRYPTION_KEY` can still decrypt the
+  keys, and the provider host you saved is trusted with the key (including whoever controls its DNS, within the SSRF rules).
 - The key is decrypted only to build one upstream request. It is never returned by any endpoint (only its last four characters),
   never written to the usage table, the audit trail, logs or metrics, and any provider text passed back to a caller, or shown in a
   test result, goes through the kit's `redact` and is truncated. A test scans every table, the metrics, the log and every response
