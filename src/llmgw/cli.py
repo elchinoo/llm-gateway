@@ -71,6 +71,12 @@ def _serve() -> None:
 
 
 def _start() -> int:
+    from apgkit import sealed as sealing
+
+    if sealing.Sealed.from_env().enabled:
+        _serve()      # sealed boot: the database URL is inside the blob, so the app migrates itself once it is unsealed (api.py)
+        return 0
+
     from .migrate import run
 
     try:

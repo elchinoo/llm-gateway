@@ -161,6 +161,15 @@ No Postgres extension is needed. A sandbox that pauses itself answers an empty `
 a restart the vault is locked until you sign in (or `LLMGW_ENCRYPTION_KEY` is set), and while it is locked **real providers answer
 503 `vault_locked` but the built-in echo models keep working**. AgentPG sandboxes speak HTTP and Postgres only, which is all this needs.
 
+### Sealed boot
+
+To keep every secret out of the platform's environment, files and image, deploy the gateway with **one** variable, `APGKIT_SEALED`: a blob
+holding `DATABASE_URL`, `LLMGW_API_KEY`, `LLMGW_OIDC_CLIENT_SECRET` and the like, encrypted (AES-256-GCM) under an operator passphrase. Make it
+with `ecoctl seal` from agentpg-ecosystem. The gateway then starts sealed: it answers 503 except on `/_seal/*` and `/healthz`. The operator
+sends the passphrase (`ecoctl unseal`, encrypted to a key that exists only in that process); the gateway opens the blob, migrates the database,
+opens (or creates) the vault with the same passphrase and starts serving. A restart seals it again. While sealing is on,
+`LLMGW_ENCRYPTION_KEY` is ignored and `llmgw start` leaves migrations to the unseal step. With no `APGKIT_SEALED` nothing changes.
+
 ## Thinking models (reasoning on or off, per target)
 
 Some models "think" before they answer: the reasoning is generated as completion tokens that count against `max_tokens`. Measured

@@ -4,9 +4,15 @@ Permissions are what the code checks (`clients:manage`); roles (given to people 
 services and local API tokens) are mapped onto them here. Client keys are a separate kind of principal that can only reach the
 data plane (`llm:use`), never an operator route; and no operator credential, wildcard included, can reach the data plane.
 """
+import os
+
 import httpx
 from apgkit import metrics as metrics_mod
-from apgkit.auth import AppAuth, Authenticator, LocalAuth, from_env
+from apgkit.auth import AppAuth, Authenticator, LocalAuth
+from apgkit.auth.env import Federation
+from apgkit.auth.oidc import TokenVerifier, jwks_ttl_from_env
+from apgkit.auth.rp import RelyingParty
+from apgkit.config import env_bool, read_secret
 from apgkit.db import Database
 from apgkit.llm import LLMClient
 from apgkit.netguard import NetGuard
@@ -58,7 +64,22 @@ SCOPE_PERMISSIONS = {
     "read": READ, "metrics": frozenset({"metrics:scrape"}), "full": ALL,
     "llmgw.use": frozenset({"llm:use"}), "llmgw.read": READ, "llmgw.metrics": frozenset({"metrics:scrape"}),
 }
-fed = from_env("LLMGW", APP)
+
+
+def _federation() -> Federation:
+    """`apgkit.auth.from_env`, except that the OIDC client secret is handed over as a callable and never read here: with sealed boot
+    it does not exist until the operator unseals the app, long after this module is imported (from_env would see an empty secret and
+    build a public client). The relying party reads it on the token exchange."""
+    issuer = os.environ.get("LLMGW_OIDC_ISSUER", "").strip()
+    client_id = os.environ.get("LLMGW_OIDC_CLIENT_ID", APP)
+    local_login = env_bool("LLMGW_LOCAL_LOGIN", True)
+    if not issuer:
+        return Federation("", client_id, None, None, True)
+    return Federation(issuer.rstrip("/"), client_id, TokenVerifier(issuer, client_id, ttl=jwks_ttl_from_env("LLMGW")),
+                      RelyingParty(issuer, client_id, lambda: read_secret("LLMGW_OIDC_CLIENT_SECRET")), local_login)
+
+
+fed = _federation()
 APP_AUTH = AppAuth(APP, fed.client_id, ROLE_PERMISSIONS, SCOPE_PERMISSIONS)
 
 

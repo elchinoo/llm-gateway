@@ -7,11 +7,12 @@ from pathlib import Path
 import anyio.to_thread
 import psycopg
 from apgkit import config, masking
+from apgkit import sealed as sealing
 from apgkit.auth import Principal, TokenError
 from apgkit.auth.rp import BINDING_COOKIE, clear_binding, safe_return_to
 from apgkit.guard import SecurityGuard
 from apgkit.ratelimit import FailureLimiter
-from apgkit.vault import VaultLocked
+from apgkit.vault import VaultLocked, sealed_unlocker
 from apgkit.web import is_https, mount_kit_static, public_url
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -19,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import __version__, aliases, audit, clients, core, gateway, hardening, usage, vault_admin
+from . import __version__, aliases, audit, clients, core, gateway, hardening, migrate, usage, vault_admin
 from . import metrics as m
 from . import settings as cfg
 from .config import get_settings
@@ -123,7 +124,14 @@ def _db_unavailable() -> HTTPException:
     return core.auth.db_unavailable()
 
 
-app = FastAPI(title="LLM gateway", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+# Sealed boot (APGKIT_SEALED): the app starts with no secret, serves only /_seal/* and the health check, and runs its lifespan after the
+# operator unseals it. Without a blob nothing changes. The callbacks run in order: migrate (needs the database URL from the blob), then
+# open (or create) the vault with the passphrase.
+sealed = sealing.Sealed.from_env()
+app = FastAPI(title="LLM gateway", version=__version__, lifespan=sealed.deferred(lifespan), docs_url=None, redoc_url=None, openapi_url=None)
+sealing.install(app, sealed)
+sealed.on_unsealed(lambda _sealed, _passphrase: migrate.run())
+sealed.on_unsealed(sealed_unlocker(core.vault, connect))
 # /v1 enforces its own 512 KB cap (OpenAI-shaped error, chunked bodies included); the guard's default 64 KB covers /api.
 app.add_middleware(SecurityGuard, csrf_header=CSRF_HEADER, csrf_prefixes=("/api/",), body_prefixes=("/api/",), observe=core.metrics.observe)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
