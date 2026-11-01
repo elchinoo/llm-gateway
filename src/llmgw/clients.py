@@ -10,7 +10,7 @@ from apgkit.auth import Principal
 from apgkit.ids import sha256
 from psycopg.types.json import Jsonb
 
-from . import core
+from . import core, rowmac
 from .core import CLIENT_KEY_PREFIX
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
@@ -70,6 +70,7 @@ def create(conn, *, name: str, description: str, allowed_aliases: list[str], rpm
     row = conn.execute("INSERT INTO client (name, description, allowed_aliases, rpm_limit, monthly_token_budget, budget_mode) "
                        "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
                        (name, description.strip(), Jsonb(allowed), rpm_limit, monthly_token_budget, budget_mode)).fetchone()
+    rowmac.seal(conn, "client", "id=%s", (row["id"],))
     conn.commit()
     return row["id"]
 
@@ -83,7 +84,7 @@ def update(conn, client_id: int, fields: dict) -> dict:
         fields["description"] = fields["description"].strip()
     if fields:
         sets = ", ".join(f"{k}=%s" for k in fields)
-        conn.execute(f"UPDATE client SET {sets}, updated_at=now() WHERE id=%s", (*fields.values(), client_id))
+        rowmac.update(conn, "client", f"{sets}, updated_at=now()", tuple(fields.values()), "id=%s", (client_id,))
         conn.commit()
     return cur
 
@@ -100,6 +101,7 @@ def create_key(conn, client_id: int, name: str = "") -> tuple[int, str]:
     raw = CLIENT_KEY_PREFIX + secrets.token_urlsafe(32)
     row = conn.execute("INSERT INTO client_key (client_id, name, prefix, key_hash) VALUES (%s,%s,%s,%s) RETURNING id",
                        (client_id, name.strip()[:60], raw[:11], sha256(raw))).fetchone()
+    rowmac.seal(conn, "client_key", "id=%s", (row["id"],))
     conn.commit()
     return row["id"], raw
 
@@ -111,11 +113,11 @@ def list_keys(conn, client_id: int) -> list[dict]:
 
 def revoke_key(conn, client_id: int, key_id: int, grace_minutes: int = 0) -> bool:
     """Revoke now, or (for a rotation) after a grace period so the app can switch over. Never extends an earlier revocation."""
-    row = conn.execute("UPDATE client_key SET revoked_at = now() + make_interval(mins => %s) WHERE id=%s AND client_id=%s "
-                       "AND (revoked_at IS NULL OR revoked_at > now() + make_interval(mins => %s)) RETURNING id",
-                       (grace_minutes, key_id, client_id, grace_minutes)).fetchone()
+    n = rowmac.update(conn, "client_key", "revoked_at = now() + make_interval(mins => %s)", (grace_minutes,),
+                      "id=%s AND client_id=%s AND (revoked_at IS NULL OR revoked_at > now() + make_interval(mins => %s))",
+                      (key_id, client_id, grace_minutes))
     conn.commit()
-    return row is not None
+    return n > 0
 
 
 def rotate_key(conn, client_id: int, key_id: int, grace_minutes: int = 0) -> tuple[int, str]:
@@ -130,15 +132,16 @@ def rotate_key(conn, client_id: int, key_id: int, grace_minutes: int = 0) -> tup
 
 def key_principal(conn, raw: str) -> Principal | None:
     """Look a client key up. `last_used_at` is refreshed at most once a minute so the hot path does not write per request."""
-    row = conn.execute(
-        "SELECT k.id AS key_id, k.last_used_at, c.id, c.name, c.allowed_aliases, c.rpm_limit, c.monthly_token_budget, c.budget_mode, c.enabled "
-        "FROM client_key k JOIN client c ON c.id = k.client_id WHERE k.key_hash=%s AND (k.revoked_at IS NULL OR k.revoked_at > now())",
-        (sha256(raw),)).fetchone()
-    if not row:
+    key = conn.execute("SELECT id, client_id, key_hash, revoked_at, last_used_at, mac FROM client_key "
+                       "WHERE key_hash=%s AND (revoked_at IS NULL OR revoked_at > now())", (sha256(raw),)).fetchone()
+    # a key or a client row without a valid MAC is as good as absent (see rowmac)
+    row = conn.execute("SELECT * FROM client WHERE id=%s", (key["client_id"],)).fetchone() if rowmac.verify_row("client_key", key) else None
+    if not row or not rowmac.verify_row("client", row):
         conn.rollback()
         return None
+    row["key_id"] = key["id"]
     conn.execute("UPDATE client_key SET last_used_at = now() WHERE id=%s AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')",
-                 (row["key_id"],))
+                 (key["id"],))
     conn.commit()
     client = {k: row[k] for k in ("id", "name", "allowed_aliases", "rpm_limit", "monthly_token_budget", "budget_mode", "enabled")}
     return Principal("client", row["name"], frozenset({"llm:use"}), scopes=frozenset({"client"}), name=row["name"], ident=row["key_id"],
@@ -146,10 +149,12 @@ def key_principal(conn, raw: str) -> Principal | None:
 
 
 def client_by_name(conn, name: str) -> dict | None:
-    row = conn.execute("SELECT id, name, allowed_aliases, rpm_limit, monthly_token_budget, budget_mode, enabled FROM client WHERE name=%s",
+    row = conn.execute("SELECT id, name, allowed_aliases, rpm_limit, monthly_token_budget, budget_mode, enabled, mac FROM client WHERE name=%s",
                        (name,)).fetchone()
     conn.rollback()
-    return row
+    if not rowmac.verify_row("client", row):
+        return None
+    return {k: v for k, v in row.items() if k != "mac"}
 
 
 def _resolve(raw: str) -> Principal | None:

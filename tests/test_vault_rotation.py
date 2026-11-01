@@ -19,7 +19,7 @@ from tests.conftest import (
 
 pytestmark = needs_db
 
-from llmgw import core  # noqa: E402
+from llmgw import core, rowmac  # noqa: E402
 from llmgw.db import connect  # noqa: E402
 
 PASSWORD = "correct horse battery staple"
@@ -57,6 +57,7 @@ def test_the_provider_key_is_a_v2_token_bound_to_its_row(client, op, vault_ready
     # a ciphertext copied over another provider's row (database write access) is useless there: the call is refused, nothing is sent
     with connect() as conn:
         conn.execute("UPDATE provider SET api_key_enc=%s WHERE id=%s", (one["api_key_enc"], p2))
+        rowmac.seal(conn, "provider", "id=%s", (p2,))        # written by a holder of the data key: the layer under test is the next one
         conn.commit()
     add_alias(client, op, "gpt", [(p2, "m")])
     _, key = add_client(client, op)
@@ -75,6 +76,7 @@ def test_a_legacy_row_still_decrypts_sends_and_is_upgraded_by_rotation(client, o
     legacy = Fernet(base64.urlsafe_b64encode(core.vault._data_key)).encrypt(UPSTREAM_KEY.encode()).decode()     # written before contexts
     with connect() as conn:
         conn.execute("UPDATE provider SET api_key_enc=%s WHERE id=%s", (legacy, pid))
+        rowmac.seal(conn, "provider", "id=%s", (pid,))        # written by a holder of the data key: the layer under test is the next one
         conn.commit()
     assert ask(client, key, model="gpt").status_code == 200
     assert upstream.calls[-1].headers["authorization"] == f"Bearer {UPSTREAM_KEY}"
@@ -100,6 +102,7 @@ def test_rotation_keeps_the_origin_binding_and_the_key_still_reaches_only_that_o
     # the binding still works: a URL changed behind the API's back gets nothing
     with connect() as conn:
         conn.execute("UPDATE provider SET base_url='https://other.example.test/v1' WHERE id=%s", (pid,))
+        rowmac.seal(conn, "provider", "id=%s", (pid,))        # written by a holder of the data key: the layer under test is the next one
         conn.commit()
     upstream.hosts["other.example.test"] = chat_ok()
     upstream.calls.clear()

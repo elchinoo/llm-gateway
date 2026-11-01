@@ -85,6 +85,8 @@ APP_AUTH = AppAuth(APP, fed.client_id, ROLE_PERMISSIONS, SCOPE_PERMISSIONS)
 
 def _on_reset(conn) -> None:
     conn.execute("UPDATE provider SET api_key_enc = NULL, api_key_last4 = NULL")
+    from . import rowmac
+    rowmac.clear(conn)               # the old MACs are under a data key that no longer exists; the next setup signs the rows again
 
 
 local = LocalAuth(APP_AUTH, env_prefix="LLMGW", token_prefix="lgt_", token_scopes={"read", "metrics", "full"}, vault=vault,

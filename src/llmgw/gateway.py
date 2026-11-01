@@ -13,7 +13,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from . import core, providers, usage
+from . import core, providers, rowmac, usage
 from . import metrics as m
 from .usage import Event
 
@@ -307,10 +307,14 @@ class Result:
 
 def _alias_row(conn, alias: str) -> dict | None:
     row = conn.execute("SELECT * FROM model_alias WHERE alias=%s", (alias,)).fetchone()
-    if row:
-        row["targets"] = conn.execute(
-            "SELECT t.position, t.upstream_model, t.extra_body, p.* FROM alias_target t JOIN provider p ON p.id = t.provider_id WHERE t.alias=%s ORDER BY t.position",
-            (alias,)).fetchall()
+    if row and rowmac.verify_row("model_alias", row):
+        # a route or a provider without a valid MAC is as good as absent (see rowmac); t.mac is renamed so p.mac stays the provider's
+        found = conn.execute(
+            "SELECT t.alias, t.position, t.provider_id, t.upstream_model, t.extra_body, t.mac AS target_mac, p.* "
+            "FROM alias_target t JOIN provider p ON p.id = t.provider_id WHERE t.alias=%s ORDER BY t.position", (alias,)).fetchall()
+        row["targets"] = [t for t in found if rowmac.verify_row("alias_target", {**t, "mac": t["target_mac"]}) and rowmac.verify_row("provider", t)]
+    else:
+        row = None
     conn.rollback()
     return row
 
@@ -319,9 +323,9 @@ def known_alias(conn, name) -> str | None:
     """The alias name if it exists (so unknown, client-chosen strings never reach a table or a metric label)."""
     if not isinstance(name, str) or len(name) > 80:
         return None
-    row = conn.execute("SELECT alias FROM model_alias WHERE alias=%s", (name,)).fetchone()
+    row = conn.execute("SELECT * FROM model_alias WHERE alias=%s", (name,)).fetchone()
     conn.rollback()
-    return row["alias"] if row else None
+    return row["alias"] if rowmac.verify_row("model_alias", row) else None
 
 
 def handle(client: dict, key_id: int | None, endpoint: str, raw: bytes) -> Result:
@@ -457,7 +461,8 @@ def _upstream_error(res: providers.Upstream | None) -> GatewayError:
 
 
 def list_models(conn, client: dict) -> list[dict]:
-    rows = conn.execute("SELECT alias, kind, extract(epoch FROM created_at)::bigint AS created FROM model_alias WHERE enabled ORDER BY alias").fetchall()
+    rows = rowmac.valid("model_alias", conn.execute(
+        "SELECT *, extract(epoch FROM created_at)::bigint AS created FROM model_alias WHERE enabled ORDER BY alias").fetchall())
     conn.rollback()
     allowed = client["allowed_aliases"]
     return [{"id": r["alias"], "object": "model", "created": r["created"], "owned_by": "llmgw", "kind": r["kind"]}

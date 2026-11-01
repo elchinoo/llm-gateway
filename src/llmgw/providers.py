@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from apgkit.llm import LLMError, redact
 from apgkit.vault import VaultError, VaultLocked
 
-from . import core
+from . import core, rowmac
 
 KINDS = {"openai", "echo"}
 PRESETS = [
@@ -98,6 +98,7 @@ def create(conn, *, name: str, kind: str, base_url: str | None, api_key: str | N
                        "VALUES (%s,%s,%s,NULL,%s,%s,%s) RETURNING id", (name, kind, url, last4, bound, enabled)).fetchone()
     if secret:      # the ciphertext is bound to the row id, which exists only now; same transaction, so no row is ever visible without it
         conn.execute("UPDATE provider SET api_key_enc=%s WHERE id=%s", (core.vault.encrypt(secret, key_context(row["id"])), row["id"]))
+    rowmac.seal(conn, "provider", "id=%s", (row["id"],))
     conn.commit()
     return row["id"]
 
@@ -119,7 +120,7 @@ def update(conn, provider_id: int, *, name: str, base_url: str | None, api_key: 
         args += [core.vault.encrypt(api_key.strip(), key_context(provider_id)), api_key.strip()[-4:], origin_of(url)]
     elif clear_key:
         sets += ["api_key_enc=NULL", "api_key_last4=NULL", "key_origin=NULL"]
-    conn.execute(f"UPDATE provider SET {', '.join(sets)} WHERE id=%s", (*args, provider_id))
+    rowmac.update(conn, "provider", ", ".join(sets), tuple(args), "id=%s", (provider_id,))
     conn.commit()
 
 

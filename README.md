@@ -215,6 +215,9 @@ Other spellings work the same way, for example `{"thinking": {"type": "disabled"
 - **Tool calling is function tools only, never streamed.** Bounded: 64 tools, 16 KB each, 128 KB together; 64 calls per assistant
   message. Tool schemas and arguments are forwarded unchanged and counted as prompt characters for budgets; nothing of them is
   stored. See `API.md` for the exact shapes and the echo provider's test hook.
+- **Row MACs.** While the vault is unlocked, clients, client keys, providers, aliases and routes must carry a valid MAC or they are
+  ignored. After upgrading an existing deployment run `llmgw adopt-rowmacs` once (asks for the admin password). Replays of an older
+  authentic row from a backup and row deletions are not detected; see SECURITY.md, "Row MACs".
 - **The requests-per-minute limit is in memory and per process.** With several replicas a client can reach N times its limit;
   put a proxy limit in front if that matters. Failed-key attempts are limited the same way (30 per minute per address).
 - **Token counts are the provider's own `usage` when it sends one.** Otherwise they are **estimates** (characters divided by 4,

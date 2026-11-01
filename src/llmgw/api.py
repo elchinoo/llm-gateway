@@ -20,7 +20,19 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import __version__, aliases, audit, clients, core, gateway, hardening, migrate, usage, vault_admin
+from . import (
+    __version__,
+    aliases,
+    audit,
+    clients,
+    core,
+    gateway,
+    hardening,
+    migrate,
+    rowmac,
+    usage,
+    vault_admin,
+)
 from . import metrics as m
 from . import settings as cfg
 from .config import get_settings
@@ -49,12 +61,19 @@ def _startup() -> None:
     """Seed the echo demo, unlock the vault if a platform secret exists, announce the setup code."""
     try:
         with connect(retries=2) as conn:
-            aliases.seed_echo(conn)
+            created = False
+            try:
+                created = fed.enabled and not core.vault.is_initialized(conn)
+                if created:
+                    core.vault.initialize_with_platform_secret(conn)   # single sign-on only: no admin password to wrap the key with
+                    conn.commit()
+                core.vault.try_unlock_with_platform_secret(conn)
+            except Exception:  # noqa: BLE001 - the demo is still seeded (unsigned); a later unlock or `llmgw adopt-rowmacs` signs it
+                conn.rollback()
+            aliases.seed_echo(conn)          # after the unlock, so the seeded rows are signed
             aliases.seed_default_aliases(conn)
-            if fed.enabled and not core.vault.is_initialized(conn):
-                core.vault.initialize_with_platform_secret(conn)   # single sign-on only: no admin password to wrap the key with
-                conn.commit()
-            core.vault.try_unlock_with_platform_secret(conn)
+            if created and core.vault.is_unlocked():
+                rowmac.adopt(conn)           # a vault that has just been created: sign what is there (see rowmac._adopt_on_first_setup)
             if local.needs_setup(conn) and not fed.enabled:
                 _announce_setup_code()
     except Exception:  # noqa: BLE001 - the database may be asleep; everything retries on the first request

@@ -5,6 +5,8 @@ import re
 
 from psycopg.types.json import Jsonb
 
+from . import rowmac
+
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,59}$")
 MAX_TARGETS = 5
 # extra_body: operator-set request fields merged into the upstream body. These keys belong to the gateway and can never be set.
@@ -98,6 +100,9 @@ def upsert(conn, alias: str, *, kind: str, description: str, enabled: bool, embe
     for i, t in enumerate(targets):
         conn.execute("INSERT INTO alias_target (alias, position, provider_id, upstream_model, extra_body) VALUES (%s,%s,%s,%s,%s)",
                      (alias, i, t["provider_id"], t["upstream_model"].strip(), Jsonb(t["extra_body"])))
+    # the operator just wrote every signed column of the alias and of all its targets (the old targets were deleted above)
+    rowmac.seal(conn, "model_alias", "alias=%s", (alias,))
+    rowmac.seal(conn, "alias_target", "alias=%s", (alias,))
     conn.commit()
     return not existed
 
@@ -138,6 +143,8 @@ def _insert_defaults(conn, provider_id: int) -> None:
         if made:
             conn.execute("INSERT INTO alias_target (alias, position, provider_id, upstream_model) VALUES (%s,0,%s,%s)",
                          (alias, provider_id, model))
+            rowmac.seal(conn, "model_alias", "alias=%s", (alias,))
+            rowmac.seal(conn, "alias_target", "alias=%s AND position=0", (alias,))
 
 
 def seed_echo(conn) -> bool:
@@ -153,6 +160,9 @@ def seed_echo(conn) -> bool:
         conn.execute("INSERT INTO model_alias (alias, kind, description) VALUES (%s,%s,%s)",
                      (alias, kind, "built-in demo model: no network, no key"))
         conn.execute("INSERT INTO alias_target (alias, position, provider_id, upstream_model) VALUES (%s,0,%s,%s)", (alias, pid, model))
+    rowmac.seal(conn, "provider", "id=%s", (pid,))
+    rowmac.seal(conn, "model_alias", "alias IN ('echo-chat', 'echo-embed')")
+    rowmac.seal(conn, "alias_target", "alias IN ('echo-chat', 'echo-embed')")
     _insert_defaults(conn, pid)
     store.put(conn, "seeded", "1")
     store.put(conn, "seeded_defaults", "1")

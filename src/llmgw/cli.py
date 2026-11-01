@@ -10,6 +10,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reset-admin", help="forget the admin password and delete stored provider keys (recovery)")
     rot = sub.add_parser("rotate-vault", help="replace the vault data key and re-encrypt stored provider keys (restart other replicas after)")
     rot.add_argument("--confirm", action="store_true", help="required: acknowledges that other replicas must be restarted")
+    sub.add_parser("adopt-rowmacs", help="sign existing rows that have no row MAC (trusts the database as it is now; asks for the admin password)")
     sub.add_parser("start", help="container entrypoint: migrate, then serve")
     args = p.parse_args(argv)
 
@@ -27,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
         print("admin password, vault and stored provider keys were cleared; the setup code flow is active again")
     elif args.cmd == "rotate-vault":
         return _rotate_vault(args.confirm)
+    elif args.cmd == "adopt-rowmacs":
+        return _adopt_rowmacs()
     elif args.cmd == "serve":
         _serve()
     elif args.cmd == "start":
@@ -56,6 +59,38 @@ def _rotate_vault(confirm: bool) -> int:
             print(f"rotation failed: {exc}", file=sys.stderr)
             return 1
     print("data key rotated; re-encrypted:", counts or "nothing", "- restart every other replica now")
+    return 0
+
+
+def _adopt_rowmacs() -> int:
+    """Sign every security-relevant row that has no MAC (a database that existed before row MACs). It TRUSTS THE DATABASE AS IT IS AT THIS
+    MOMENT: run it on a database you believe untampered, once, after migrating. Asks for the admin password (never an argument)."""
+    import getpass
+
+    from apgkit.vault import VaultError
+
+    from . import audit, rowmac
+    from .core import vault
+    from .db import connect
+
+    with connect() as conn:
+        password = getpass.getpass("admin password: ") if vault.has_password_wrap(conn) and not vault.is_unlocked() else None
+        conn.rollback()
+        try:
+            vault.try_unlock_with_platform_secret(conn)
+            if not vault.is_unlocked() and password is not None:
+                vault.unlock_with_password(conn, password)
+        except VaultError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+        conn.commit()
+        if not vault.is_unlocked():
+            print("the vault is locked: the admin password is wrong, or set LLMGW_ENCRYPTION_KEY for this command", file=sys.stderr)
+            return 1
+        counts = rowmac.adopt(conn)
+        audit.log(conn, "cli", "rowmacs_adopted", "", **counts)
+    print("signed rows without a MAC: " + ", ".join(f"{t} {n}" for t, n in counts.items()) +
+          ". This trusted the database as it was now; rows written by anything else from here on are ignored.")
     return 0
 
 

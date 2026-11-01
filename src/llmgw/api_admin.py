@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import aliases, audit, clients, providers, usage
+from . import aliases, audit, clients, providers, rowmac, usage
 from . import settings as cfg
 from .db import connect
 
@@ -154,7 +154,7 @@ def build_router(require) -> APIRouter:
     def test_provider(provider_id: int, body: TestBody, p: Principal = Depends(require("providers:manage"))):
         with connect() as conn:
             row = conn.execute("SELECT * FROM provider WHERE id=%s", (provider_id,)).fetchone()
-            if not row:
+            if not row or not rowmac.verify_row("provider", row):      # a row without a valid MAC would send its key to an unvetted URL
                 raise HTTPException(404, "provider not found")
             out = providers.test(row, body.model)
             audit.log(conn, p.actor, "provider.test", row["name"], model=body.model, ok=out["ok"])

@@ -100,6 +100,27 @@ is what it enforces, and where it stops.
 - The container runs as a non-root user and holds no credentials; the database URL arrives at runtime.
 - **Masking durability**: the read-only database role's REVOKEs are re-asserted every 5 minutes (grants after startup would otherwise reopen the secret tables); gauge `masking_drift_tables` and `/readyz` `masking` show drift. A new grant can be readable for up to one interval.
 
+**Row MACs**
+- With the vault unlocked (always, with sealed boot) the rows that grant access or carry trust carry an HMAC under a subkey of the
+  vault data key (agentpg-kit `Vault.row_mac`), kept in a `mac` column. Anyone who can only write to the database (stolen credentials)
+  cannot forge one, so a planted or edited row is treated as missing and the request fails closed (401 for a client key, 404 for an
+  alias, the route is skipped for a target). Browser sessions and operator API tokens are signed by the kit.
+- Covered tables and columns: `client` (id, name, allowed_aliases, rpm_limit, monthly_token_budget, budget_mode, enabled), `client_key`
+  (id, client_id, key_hash, revoked_at), `provider` (id, kind, base_url, api_key_enc, key_origin, enabled), `model_alias` (alias, kind,
+  enabled, embedding_dim), `alias_target` (alias, position, provider_id, upstream_model, extra_body). Writes made by the gateway sign in
+  the same transaction; an update re-signs only a row that verified before it (an unrelated update never legitimises a planted row).
+  A refused row is logged once per row (table and primary key, never values), audited (`row_mac_invalid`) and counted
+  (`llmgw_tampered_rows_total`).
+- While the vault is locked (development, tests, no admin password yet) nothing is enforced and a write clears the row's MAC. Setting
+  the admin password for the first time signs what exists. **Upgrading an existing deployment:** after migrating, run
+  `llmgw adopt-rowmacs` once (it asks for the admin password), on a database you trust at that moment; until then, with the vault
+  unlocked, existing rows are ignored. `llmgw rotate-vault` and `POST /api/vault/rotate` re-sign the rows that verified.
+- Honest limits: an older **authentic row restored or replayed from a backup** verifies; **deleting** rows (a client, a key, a
+  target) is not detected, only unsigned additions and edits are; columns outside the list above (descriptions, display names,
+  prices, `updated_at`, `last_used_at`, `api_key_last4`) are not covered, and neither are usage and audit rows or settings. Someone who
+  holds the running process (or the data key) can sign anything. The MAC does not replace the origin binding and the encryption of
+  provider keys; it sits next to them.
+
 ## Known limits
 - **The request rate limit is per process and in memory**; with N replicas a client can reach N times its limit. So are the
   failed-credential limits.

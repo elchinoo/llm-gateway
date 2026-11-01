@@ -4,7 +4,7 @@ import logging
 
 from apgkit.vault import VaultError, VaultLocked
 
-from . import audit, core
+from . import audit, core, rowmac
 
 log = logging.getLogger("llmgw.vault")
 
@@ -31,7 +31,11 @@ def rotate(conn, password: str | None, actor: str) -> dict[str, int]:
     if needs_password and password is None:
         raise RotationError("the admin password is required")
     try:
+        snap = rowmac.snapshot(conn)  # rows that verify under the old key: every MAC changes with the data key (provider keys are re-encrypted)
+        conn.rollback()
         counts = v.rotate_data_key(conn, password=password if needs_password else None)
+        rowmac.reseal(conn, snap)     # signed again under the new key; rows that did not verify stay unsigned
+        conn.commit()
     except VaultLocked as exc:
         raise RotationError("the vault is locked: enter the admin password") from exc
     except VaultError as exc:

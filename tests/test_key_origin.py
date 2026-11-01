@@ -62,6 +62,7 @@ def test_same_origin_edits_keep_the_key_and_clearing_it_is_allowed(client, op, v
 
 
 def test_a_stored_key_is_not_sent_to_a_different_origin(client, op, vault_ready, upstream):
+    from llmgw import rowmac
     from llmgw.db import connect
 
     pid = add_provider(client, op)
@@ -70,6 +71,7 @@ def test_a_stored_key_is_not_sent_to_a_different_origin(client, op, vault_ready,
     upstream.hosts["llm1.example.test"] = upstream.hosts["other.example.test"] = chat_ok()
     with connect() as conn:       # a change that bypasses the API (database write)
         conn.execute("UPDATE provider SET base_url=%s WHERE id=%s", (NEW, pid))
+        rowmac.seal(conn, "provider", "id=%s", (pid,))        # written by a holder of the data key: the layer under test is the next one
         conn.commit()
     r = ask(client, key, model="gpt")
     assert r.status_code == 502 and "key_origin_mismatch" in r.json()["error"]["message"]
@@ -80,6 +82,7 @@ def test_a_stored_key_is_not_sent_to_a_different_origin(client, op, vault_ready,
     # a key with no recorded origin is also refused
     with connect() as conn:
         conn.execute("UPDATE provider SET base_url='https://llm1.example.test/v1', key_origin=NULL WHERE id=%s", (pid,))
+        rowmac.seal(conn, "provider", "id=%s", (pid,))        # written by a holder of the data key: the layer under test is the next one
         conn.commit()
     assert ask(client, key, model="gpt").status_code == 502 and upstream.calls == []
 
